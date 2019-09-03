@@ -2,25 +2,37 @@
 #include <mutex>
 #include <jthread>
 #include <stop_token>
+#include <atomic_wait>
 #include <latch>
 #include <iostream>
 #include <semaphore>
+#include <functional>
 #include <optional>
 
 #include <cjdb/concepts.hpp>
 
+#if !defined(NDEBUG) && !defined(__NO_LOGGING)
+  #define LOG(...) std::cout << __VA_ARGS__ "\n"
+#else
+  #define LOG(...)
+#endif
+
 namespace std { using namespace cjdb; }
 
 struct thread_group {
+private:
+  std::vector<std::jthread> members;
+
+public:
   thread_group(thread_group const&) = delete;
   thread_group& operator=(thread_group const&) = delete;
-  
+
   thread_group(std::size_t count, std::invocable auto f) {
     // TODO: Something something ranges, something something no raw loops.
     members.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
       members.emplace_back(std::jthread(f));
-    }  
+    }
   }
 
   thread_group(std::size_t count, std::invocable<std::stop_token> auto f) {
@@ -28,14 +40,8 @@ struct thread_group {
     members.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
       members.emplace_back(std::jthread(f));
-    }  
+    }
   }
-
-  void request_stop() {
-    for (auto& thread : members) thread.request_stop();
-  }
-
-  std::vector<std::jthread> members;
 };
 
 // TODO: Need a way to shut it down.
@@ -61,7 +67,7 @@ public:
     remaining_space.acquire();
     {
       std::scoped_lock l(items_mtx);
-      items.emplace(std::forward<decltype(t)>(t));            
+      items.emplace(std::forward<decltype(t)>(t));
     }
     items_produced.release();
   }
@@ -79,54 +85,67 @@ public:
     items_produced.release(std::distance(begin, end));
   }
 
-  // Dequeue one entry.
-  T dequeue()
-  {
-    std::cout << "entered dequeue\n";
-    items_produced.acquire();
-    std::cout << "items_produced.acquire() succeeded\n";
+  // Attempt to dequeue one entry.
+  template <typename Rep, typename Period>
+  std::optional<T> try_dequeue_for(
+    std::chrono::duration<Rep, Period> const& rel_time
+  ) {
     std::optional<T> tmp;
+    LOG("entered, about to items_produced.acquire()");
+    if (!items_produced.try_acquire_for(rel_time))
+      return tmp;
+    LOG("items_produced.acquire() succeeded");
     {
       std::scoped_lock l(items_mtx);
-      std::cout << "lock acquired\n";
+      LOG("lock acquired");
+      assert(!items.empty());
       tmp = std::move(items.front());
       items.pop();
     }
-    std::cout << "releasing space\n";
+    LOG("lock released, about to remaining_space.release()");
     remaining_space.release();
-    std::cout << "exiting dequeue\n";
-    return *tmp; // Do I need to std::move here?
+    LOG("remaining_space.release() succeeded");
+    return tmp; // Do I need to std::move here?
+  }
+
+  ~concurrent_bounded_queue() {
+    LOG("destroying queue");
   }
 };
 
-int main() 
+int main()
 {
   std::atomic<int> count(0);
 
   concurrent_bounded_queue<std::function<void()>, 64> tasks;
 
   {
-    thread_group tg(4,
-      [&] (std::stop_token stop)
+    thread_group tg(8,
+      [&] (std::stop_token stoken)
       {
-        std::function<void()> f;
-        do {
-          tasks.dequeue()();
-        } while (!stop.stop_requested());
-        std::cout << "exiting\n";
+        while (!stoken.stop_requested()) {
+          auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
+          if (f) {
+            assert(*f);
+            (*f)();
+          }
+        }
+        LOG("worker thread exiting");
       }
     );
 
-    tg.request_stop(); 
+    for (std::size_t i = 0; i < 256; ++i)
+      tasks.enqueue([&] { ++count; });
 
-    std::latch l(5);
-    for (std::size_t i = 0; i < 4; ++i)
-      tasks.enqueue([&] { 
-        std::cout << "arriving at latch\n";
-        l.arrive_and_wait();
-      });
+    std::latch l(9);
+    for (std::size_t i = 0; i < 8; ++i)
+      tasks.enqueue(
+        [&] {
+          LOG("arriving at latch");
+          l.arrive_and_wait();
+          LOG("arrived at latch");
+        });
     l.arrive_and_wait();
-
   }
 
   // TODO: `format`.
