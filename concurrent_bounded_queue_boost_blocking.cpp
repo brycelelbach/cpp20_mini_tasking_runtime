@@ -26,13 +26,13 @@ private:
 public:
   thread_group(thread_group const&) = delete;
   thread_group& operator=(thread_group const&) = delete;
-  
+
   thread_group(std::size_t count, std::invocable auto f) {
     // TODO: Something something ranges, something something no raw loops.
     members.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
       members.emplace_back(std::jthread(f));
-    }  
+    }
   }
 
   thread_group(std::size_t count, std::invocable<std::stop_token> auto f) {
@@ -40,7 +40,7 @@ public:
     members.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
       members.emplace_back(std::jthread(f));
-    }  
+    }
   }
 
   void request_stop() {
@@ -51,18 +51,22 @@ public:
 // TODO: Need a way to shut it down.
 // TODO: For forward progress, need to try_acquire and then pop some work from
 // the queue when queuing.
-// TODO: Should N be ptrdiff_t or size_t?
+// TODO: Should QueueDepth be ptrdiff_t or size_t?
 
-template <typename T, std::size_t N>
+template <typename T, std::size_t QueueDepth>
 struct concurrent_bounded_queue {
 private:
   std::queue<T> items; // TODO: Would prefer a fixed-sized queue.
   std::mutex items_mtx;
-  std::counting_semaphore<N> items_produced  { 0 };
-  std::counting_semaphore<N> remaining_space { N };
+  std::counting_semaphore<QueueDepth> items_produced{0};
+  std::counting_semaphore<QueueDepth> remaining_space{QueueDepth};
 
 public:
   constexpr concurrent_bounded_queue() = default;
+
+  ~concurrent_bounded_queue() {
+    LOG("destroying queue");
+  }
 
   // TODO: Lift common queue mutual exclusion code from enqueue variants.
 
@@ -73,7 +77,7 @@ public:
     remaining_space.acquire();
     {
       std::scoped_lock l(items_mtx);
-      items.emplace(std::forward<decltype(t)>(t));            
+      items.emplace(std::forward<decltype(t)>(t));
     }
     items_produced.release();
   }
@@ -99,20 +103,20 @@ public:
       return false;
     {
       std::scoped_lock l(items_mtx);
-      items.emplace(std::forward<decltype(t)>(t));            
+      items.emplace(std::forward<decltype(t)>(t));
     }
     items_produced.release();
     return true;
   }
 
   // TODO: Lift common queue mutual exclusion code from dequeue variants.
-  
+
   // Attempt to dequeue one entry.
   std::optional<T> try_dequeue() {
     std::optional<T> tmp;
     LOG("entered, about to items_produced.acquire()");
     if (!items_produced.try_acquire())
-      return tmp; 
+      return tmp;
     LOG("items_produced.acquire() succeeded");
     {
       std::scoped_lock l(items_mtx);
@@ -135,7 +139,7 @@ public:
     std::optional<T> tmp;
     LOG("entered, about to items_produced.acquire()");
     if (!items_produced.try_acquire_for(rel_time))
-      return tmp; 
+      return tmp;
     LOG("items_produced.acquire() succeeded");
     {
       std::scoped_lock l(items_mtx);
@@ -151,74 +155,92 @@ public:
   }
 };
 
-int main() 
+template <std::size_t QueueDepth>
+struct bounded_depth_task_manager
+{
+private:
+  concurrent_bounded_queue<std::function<void()>, QueueDepth> tasks;
+  std::atomic<std::size_t> active_task_count{0};
+  std::latch exit_latch;
+  thread_group threads; // This must be the last member initialized in this class;
+                        // we start the threads in the class constructor, and the
+                        // worker thread function accesses the other members.
+
+  void process_tasks(std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
+      auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
+      if (f) {
+        active_task_count.fetch_add(1, std::memory_order_release);
+        (*f)();
+        active_task_count.fetch_sub(1, std::memory_order_release);
+      }
+    }
+    LOG("worker thread beginning shutdown");
+    // We've gotten a stop request, but there may still be work in the queue,
+    // so let's clear it out.
+    while (true) {
+      auto f = tasks.try_dequeue();
+      if (f)
+        (*f)();
+      else if (0 == active_task_count.load(std::memory_order_acquire))
+        break;
+    }
+    LOG("worker thread has shutdown; arriving at latch");
+    exit_latch.arrive_and_wait();
+    LOG("worker thread has shutdown; arrived at latch");
+  }
+
+public:
+  bounded_depth_task_manager(std::size_t num_threads)
+    : exit_latch(num_threads + 1)
+    , threads(num_threads, [&] (std::stop_token stoken) { process_tasks(stoken); })
+  {}
+
+  ~bounded_depth_task_manager() {
+    threads.request_stop();
+    exit_latch.arrive_and_wait();
+  }
+
+  template <typename Invocable>
+  void enqueue(Invocable&& f) {
+    while (!tasks.try_enqueue(std::forward<decltype(f)>(f))) {
+      // Dequeue and execute tasks to clear out space for the work we're trying
+      // to enqueue.
+      auto f = tasks.try_dequeue();
+      if (f) {
+        active_task_count.fetch_add(1, std::memory_order_release);
+        (*f)();
+        active_task_count.fetch_sub(1, std::memory_order_release);
+      }
+    }
+  }
+};
+
+int main()
 {
   std::atomic<int> count(0);
 
-  concurrent_bounded_queue<std::function<void()>, 64> tasks;
-
   {
-    std::atomic<int> active(0);
-
-    std::latch exit(5);
-    thread_group tg(4,
-      [&] (std::stop_token stoken)
-      {
-        while (!stoken.stop_requested()) {
-          auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
-          if (f) {
-            active.fetch_add(1, std::memory_order_release);
-            (*f)();
-            active.fetch_sub(1, std::memory_order_release);
-          }
-        }
-        LOG("worker thread beginning shutdown");
-        while (true) {
-          auto f = tasks.try_dequeue();
-          if (f)
-            (*f)();
-          else if (0 == active.load(std::memory_order_acquire))
-            break;
-        }
-        LOG("worker thread has shutdown; arriving at latch");
-        exit.arrive_and_wait();
-        LOG("worker thread has shutdown; arrived at latch");
-      }
-    );
-
-    auto enqueue_boost_block =
-      [&] (auto&& f) {
-        while (!tasks.try_enqueue(std::forward<decltype(f)>(f))) { 
-          auto f = tasks.try_dequeue();
-          if (f) {
-            active.fetch_add(1, std::memory_order_release);
-            (*f)();
-            active.fetch_sub(1, std::memory_order_release);
-          }
-        }
-      };
+    bounded_depth_task_manager<64> tm(8);
 
     for (std::size_t i = 0; i < 128; ++i)
-      tasks.enqueue([&] { ++count; });
+      tm.enqueue([&] { ++count; });
 
     struct enqueue_recursively {
-      decltype(enqueue_boost_block)& enqueue_boost_block;
-      decltype(tasks)& tasks;
+      decltype(tm)& tm;
       decltype(count)& count;
       std::size_t levels_remaining;
 
       void operator()() {
         ++count;
-        if (0 == levels_remaining) return;
-        enqueue_boost_block(enqueue_recursively{enqueue_boost_block, tasks, count, levels_remaining - 1});
-        enqueue_boost_block(enqueue_recursively{enqueue_boost_block, tasks, count, levels_remaining - 1});
+        if (0 != levels_remaining) {
+          tm.enqueue(enqueue_recursively{tm, count, levels_remaining - 1});
+          tm.enqueue(enqueue_recursively{tm, count, levels_remaining - 1});
+        }
       }
     };
 
-    tasks.enqueue(enqueue_recursively{enqueue_boost_block, tasks, count, 8});
-
-    tg.request_stop();
-    exit.arrive_and_wait();
+    tm.enqueue(enqueue_recursively{tm, count, 8});
   }
 
   // TODO: `format`.

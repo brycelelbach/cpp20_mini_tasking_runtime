@@ -47,18 +47,22 @@ public:
 // TODO: Need a way to shut it down.
 // TODO: For forward progress, need to try_acquire and then pop some work from
 // the queue when queuing.
-// TODO: Should N be ptrdiff_t or size_t?
+// TODO: Should QueueDepth be ptrdiff_t or size_t?
 
-template <typename T, std::size_t N>
+template <typename T, std::size_t QueueDepth>
 struct concurrent_bounded_queue {
 private:
   std::queue<T> items; // TODO: Would prefer a fixed-sized queue.
   std::mutex items_mtx;
-  std::counting_semaphore<N> items_produced  { 0 };
-  std::counting_semaphore<N> remaining_space { N };
+  std::counting_semaphore<QueueDepth> items_produced{0};
+  std::counting_semaphore<QueueDepth> remaining_space{QueueDepth};
 
 public:
   constexpr concurrent_bounded_queue() = default;
+
+  ~concurrent_bounded_queue() {
+    LOG("destroying queue");
+  }
 
   // Enqueue one entry.
   template <typename U>
@@ -106,10 +110,6 @@ public:
     remaining_space.release();
     LOG("remaining_space.release() succeeded");
     return tmp; // Do I need to std::move here?
-  }
-
-  ~concurrent_bounded_queue() {
-    LOG("destroying queue");
   }
 };
 
