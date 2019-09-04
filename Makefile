@@ -5,7 +5,7 @@
 # Distributed under the Boost Software License v1.0 (boost.org/LICENSE_1_0.txt)
 ###############################################################################
 
-# Class of build (`debug` or `release`).
+# Class of build (`debug`, `optimized_debug`, `release`).
 BUILD_TYPE      ?= debug
 # The build directory to create and use.
 BUILD_DIRECTORY ?= $(ROOT)/build__$(BUILD_TYPE)
@@ -40,7 +40,6 @@ define PRINT_RULE =
 	@$(1) 2>&1 | tee -a build.log
 endef
 
-
 IGNORE := $(call PRINT_CONFIG,"///////////////////////////////////////////////////////////////////////////////")
 IGNORE := $(call PRINT_CONFIG,"// Settings")
 IGNORE := $(call PRINT_CONFIG,"///////////////////////////////////////////////////////////////////////////////")
@@ -70,8 +69,8 @@ ISO_CXX_FLAGS   := $(strip $(ISO_CXX_FLAGS))
 
 ifeq      ($(BUILD_TYPE),release)
   ISO_CXX_FLAGS += -O3 -DNDEBUG
-else ifeq ($(BUILD_TYPE),release_with_asserts)
-  ISO_CXX_FLAGS += -O3 -g
+else ifeq ($(BUILD_TYPE),optimized_debug)
+  ISO_CXX_FLAGS += -O3 -g -DNDEBUG
 else ifeq ($(BUILD_TYPE),debug)
   ISO_CXX_FLAGS += -O0 -g -DSAFE
 endif
