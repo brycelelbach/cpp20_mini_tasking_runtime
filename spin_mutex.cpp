@@ -24,18 +24,18 @@ public:
 
 struct spin_mutex {
 private:
-	std::atomic<bool> flag = ATOMIC_VAR_INIT(0);
+  std::atomic<bool> flag = ATOMIC_VAR_INIT(0);
 
 public:
-	void lock() noexcept {
-		while (flag.exchange(true, std::memory_order_acquire))
-			atomic_wait_explicit(&flag, true, std::memory_order_relaxed);
-	}
+  void lock() noexcept {
+    while (flag.exchange(true, std::memory_order_acquire))
+      atomic_wait_explicit(&flag, true, std::memory_order_relaxed);
+  }
 
-	void unlock() noexcept {
-		flag.store(0, std::memory_order_release);
-		atomic_notify_one(&flag);
-	}
+  void unlock() noexcept {
+    flag.store(0, std::memory_order_release);
+    atomic_notify_one(&flag);
+  }
 };
 
 int main() {
