@@ -45,6 +45,8 @@
 
 // TODO: Make the task manager a sender? That sends itself?
 
+// TODO: Do first chunk in calling thread.
+
 template <typename Sig>
 struct fire_once;
 
@@ -863,22 +865,14 @@ OutputIterator inclusive_scan(InputIterator first, InputIterator last,
 } // namespace std
 
 // TODO: Test this for size = 0, size = 1, size = 2, etc.
+// TODO: Test this for small chunk sizes.
 template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp, typename T>
 unique_future<OutputIt, Executor>
 async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
                      T init, BinaryOp op, std::size_t chunk_size)
 {
-  std::size_t const inputs   = std::distance(first, last);
-  std::size_t const elements = inputs - 1;
+  std::size_t const elements = std::distance(first, last);
   std::size_t const chunks   = (1 + ((elements - 1) / chunk_size)); // Round up.
-
-  if (0 == inputs) co_return output;
-
-  *output = init;
-  init = op(init, *first++);
-  ++output;
-
-  if (1 == inputs) co_return output;
 
   std::vector<unique_future<T, Executor>> sweep;
   sweep.reserve(chunks);
@@ -890,8 +884,14 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
         LOG("upsweep (" << this_begin << ", " << this_end << ")");
-        return *--std::inclusive_scan(first + this_begin, first + this_end,
-                                      output + this_begin, op, T{});
+        // Save the value of the final element which we need to add into the
+        // sum we return, just in case this is an in-place scan.
+        auto const last_element = first[this_end - 1];
+        // Add the value of the final element into the sum we return.
+        // FIXME: Probably wrong for small chunk sizes.
+        return op(*--std::exclusive_scan(first + this_begin, first + this_end,
+                                         output + this_begin, T{}, op),
+                  last_element);
       }
     ));
 
@@ -902,6 +902,9 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
 
   // We add in init here.
   std::inclusive_scan(sums.begin(), sums.end(), sums.begin(), op, init);
+
+  for (std::size_t chunk = 0; chunk < chunks; ++chunk)
+    LOG("scanned sums[" << chunk << "] == " << sums[chunk]);
 
   sweep.clear();
 
@@ -944,7 +947,6 @@ int main()
 {
   std::vector<std::uint64_t> u;
 
-  //std::iota_n(std::back_inserter(u), 128, 0);
   std::fill_n(std::back_inserter(u), 128, 1);
 
   for (std::size_t i = 0; i < u.size(); ++i)
@@ -958,15 +960,45 @@ int main()
   u.clear();
   std::fill_n(std::back_inserter(u), 128, 1);
 
+  std::vector<std::uint64_t> v = {
+    1, 0, 1, 0, 1, 1, 1, 1,
+    1, 0, 1, 0, 0, 1, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 1,
+    1, 0, 0, 1, 1, 1, 0, 1
+  };
+
+  for (std::size_t i = 0; i < u.size(); ++i)
+    std::cout << "initial v[" << i << "]: " << v[i] << "\n";
+
+  std::exclusive_scan(v.begin(), v.end(), v.begin(), 0, std::plus{});
+
+  for (std::size_t i = 0; i < u.size(); ++i)
+    std::cout << "gold v[" << i << "]: " << v[i] << "\n";
+
+  v.clear();
+  v = std::vector<std::uint64_t>{
+    1, 0, 1, 0, 1, 1, 1, 1,
+    1, 0, 1, 0, 0, 1, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 1,
+    1, 0, 0, 1, 1, 1, 0, 1
+  };
+
   {
     unbounded_depth_task_manager tm(8);
 
     async_exclusive_scan(tm.get_executor(),
-                         u.begin(), u.end(), u.begin(), 0, std::plus{},
+                         u.begin(), u.end(), u.begin(), std::uint64_t{0}, std::plus{},
+                         4).get();
+
+    async_exclusive_scan(tm.get_executor(),
+                         v.begin(), v.end(), v.begin(), std::uint64_t{0}, std::plus{},
                          4).get();
   }
 
   for (std::size_t i = 0; i < u.size(); ++i)
     std::cout << "observed u[" << i << "]: " << u[i] << "\n";
+
+  for (std::size_t i = 0; i < v.size(); ++i)
+    std::cout << "observed v[" << i << "]: " << v[i] << "\n";
 }
 
