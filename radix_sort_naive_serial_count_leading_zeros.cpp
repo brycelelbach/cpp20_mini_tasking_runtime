@@ -7,8 +7,26 @@
 #include <iostream>
 
 #include <climits>
+#include <cassert>
 
 namespace std {
+
+template <typename InputIterator, typename T, typename BinaryOperation>
+T accumulate(InputIterator first, InputIterator last, T init, BinaryOperation op)
+{
+  for (; first != last; ++first) {
+    init = op(std::move(init), *first);
+  }
+  return init;
+}
+
+template <typename InputIterator, typename T>
+T accumulate(InputIterator first, InputIterator last, T init)
+{
+  for (; first != last; ++first)
+    init = std::move(init) + *first;
+  return init;
+}
 
 template <typename InputIterator, typename OutputIterator, typename T, typename BinaryOp>
 OutputIterator exclusive_scan(InputIterator first, InputIterator last,
@@ -112,11 +130,17 @@ int main() {
   std::uint64_t min_leading_zeros =
     std::accumulate(u.begin(), u.end(), element_bits,
                     [] (auto l, auto r) {
-                      return std::min(l, __builtin_clz(r));
+                      // `__builtin_clz` has UB if the input is 0, thus the | 1.
+                      return std::min(l, std::uint64_t(__builtin_clzll(r | 1)));
                     });
 
   assert(min_leading_zeros <= element_bits);
   std::uint64_t max_set_bit = element_bits - min_leading_zeros;
+
+  std::cout << "element_bits      == " << element_bits << "\n";
+  std::cout << "min_leading_zeros == " << min_leading_zeros << "\n";
+  std::cout << "max_set_bit       == " << max_set_bit << "\n";
+  std::cout << "\n";
 
   std::vector<std::uint64_t> v(u.size());
 
