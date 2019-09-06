@@ -856,6 +856,7 @@ async_inclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
         LOG("upsweep (" << this_begin << ", " << this_end << ")");
+        // FIXME: We need to pass in the intermediate type here.
         return T(*--std::inclusive_scan(first + this_begin, first + this_end,
                                         output + this_begin, op));
       }
@@ -904,6 +905,8 @@ ForwardIt iota_n(ForwardIt first, Size count, T value) {
 }
 
 } // namespace std
+
+
 
 int main()
 {
