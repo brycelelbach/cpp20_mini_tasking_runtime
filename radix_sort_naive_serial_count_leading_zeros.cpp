@@ -5,6 +5,7 @@
 #include <iterator>
 #include <bitset>
 #include <iostream>
+#include <random>
 
 #include <climits>
 #include <cassert>
@@ -12,7 +13,7 @@
 namespace std {
 
 template <typename InputIterator, typename T, typename BinaryOperation>
-T accumulate(InputIterator first, InputIterator last, T init, BinaryOperation op)
+T reduce(InputIterator first, InputIterator last, T init, BinaryOperation op)
 {
   for (; first != last; ++first) {
     init = op(std::move(init), *first);
@@ -21,7 +22,7 @@ T accumulate(InputIterator first, InputIterator last, T init, BinaryOperation op
 }
 
 template <typename InputIterator, typename T>
-T accumulate(InputIterator first, InputIterator last, T init)
+T reduce(InputIterator first, InputIterator last, T init)
 {
   for (; first != last; ++first)
     init = std::move(init) + *first;
@@ -86,7 +87,7 @@ OutputIterator inclusive_scan(InputIterator first, InputIterator last,
 } // namespace std
 
 template <typename InputIt, typename OutputIt>
-OutputIt
+std::uint64_t
 radix_sort_split(InputIt first, InputIt last, OutputIt output, std::uint64_t bit)
 {
   // TODO: This probably needs less storage.
@@ -96,12 +97,20 @@ radix_sort_split(InputIt first, InputIt last, OutputIt output, std::uint64_t bit
   std::transform(first, last, e.begin(),
                  [=] (auto t) { return !(t & (1 << bit)); });
 
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    std::cout << "count 0s: " << i << " " << e[i] << "\n";
+  std::cout << "\n";
+
   // Count the last one if it's set, as we won't get it on the scan.
   std::uint64_t total_falses = e.back();
 
   std::exclusive_scan(e.begin(), e.end(), e.begin(), std::uint64_t(0));
 
   total_falses += e.back();
+
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    std::cout << "scan: " << i << " " << e[i] << "\n";
+  std::cout << "\n";
 
   // Compute destination indices.
   for (std::uint64_t i = 0; i < e.size(); ++i) {
@@ -112,30 +121,38 @@ radix_sort_split(InputIt first, InputIt last, OutputIt output, std::uint64_t bit
   for (std::uint64_t i = 0; i < e.size(); ++i)
     output[e[i]] = first[i];
 
-  return output + e.size();
+  return total_falses;
 }
 
 int main() {
   constexpr std::uint64_t element_bits = sizeof(std::uint64_t) * CHAR_BIT;
 
-  std::vector<std::uint64_t> u = {
-    0b100, 0b111, 0b010, 0b110, 0b011, 0b101, 0b001, 0b000
-  };
+//  std::vector<std::uint64_t> u = {
+//    0b100, 0b111, 0b010, 0b110, 0b011, 0b101, 0b001, 0b000
+//  };
+
+  std::vector<std::uint64_t> u(32);
+  {
+    std::mt19937 g(1337);
+    std::iota(u.begin(), u.end(), 0);
+    std::shuffle(u.begin(), u.end(), g);
+  }
 
   for (std::uint64_t i = 0; i < u.size(); ++i)
     std::cout << std::bitset<element_bits>(u[i]) << " " << u[i] << "\n";
   std::cout << "\n";
 
   // Find the smallest number of leading zeros in the input.
-  std::uint64_t min_leading_zeros =
-    std::accumulate(u.begin(), u.end(), element_bits,
-                    [] (auto l, auto r) {
-                      // `__builtin_clz` has UB if the input is 0, thus the | 1.
-                      return std::min(l, std::uint64_t(__builtin_clzll(r | 1)));
-                    });
+  std::uint64_t const min_leading_zeros =
+    std::reduce(u.begin(), u.end(), 0,
+                [] (auto l, auto r) {
+                  // `__builtin_clz` has UB if the input is 0, thus the | 1.
+                  return std::min(std::uint64_t(__builtin_clzll(l | 1)),
+                                  std::uint64_t(__builtin_clzll(r | 1)));
+                });
 
   assert(min_leading_zeros <= element_bits);
-  std::uint64_t max_set_bit = element_bits - min_leading_zeros;
+  std::uint64_t const max_set_bit = element_bits - min_leading_zeros;
 
   std::cout << "element_bits      == " << element_bits << "\n";
   std::cout << "min_leading_zeros == " << min_leading_zeros << "\n";
