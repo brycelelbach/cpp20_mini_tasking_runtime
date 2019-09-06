@@ -879,7 +879,6 @@ int main()
 {
   std::vector<std::uint64_t> u;
 
-  //std::iota_n(std::back_inserter(u), 128, 0);
   std::fill_n(std::back_inserter(u), 128, 1);
 
   for (std::size_t i = 0; i < u.size(); ++i)
@@ -893,8 +892,8 @@ int main()
     unbounded_depth_task_manager tm(8);
 
     r = async_reduce(tm.get_executor(),
-                 u.begin(), u.end(), 0, std::plus{},
-                 4).get();
+                     u.begin(), u.end(), 0, std::plus{},
+                     4).get();
   }
 
   std::cout << "observed r: " << r << "\n";
