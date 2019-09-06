@@ -812,6 +812,29 @@ unique_future<std::uint64_t, Executor> afibonacci(Executor exec, std::uint64_t n
 
 namespace std {
 
+template <typename InputIterator, typename OutputIterator, typename T, typename BinaryOp>
+OutputIterator exclusive_scan(InputIterator first, InputIterator last,
+                              OutputIterator result, T init, BinaryOp op)
+{
+  if (first != last) {
+    T saved = init;
+    do {
+      init = op(init, *first);
+      *result = saved;
+      saved = init;
+      ++result;
+    } while (++first != last);
+  }
+  return result;
+}
+
+template <typename InputIterator, typename OutputIterator, typename T>
+OutputIterator exclusive_scan(InputIterator first, InputIterator last,
+                              OutputIterator result, T init)
+{
+  return exclusive_scan(first, last, result, init, std::plus{});
+}
+
 template <typename InputIterator, typename OutputIterator, typename BinaryOp, typename T>
 OutputIterator inclusive_scan(InputIterator first, InputIterator last,
                               OutputIterator result, BinaryOp op, T init)
@@ -839,12 +862,22 @@ OutputIterator inclusive_scan(InputIterator first, InputIterator last,
 
 } // namespace std
 
+// TODO: Test this for size = 0, size = 1, size = 2, etc.
 template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp, typename T>
 unique_future<OutputIt, Executor>
-async_inclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
-                     BinaryOp op, T init, std::size_t chunk_size) {
-  std::size_t const elements = std::distance(first, last);
+async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
+                     T init, BinaryOp op, std::size_t chunk_size) {
+  std::size_t const inputs   = std::distance(first, last);
+  std::size_t const elements = inputs - 1;
   std::size_t const chunks   = (1 + ((elements - 1) / chunk_size)); // Round up.
+
+  if (0 == inputs) co_return output;
+
+  *output = init;
+  init = op(init, *first++);
+  ++output;
+
+  if (1 == inputs) co_return output;
 
   std::vector<unique_future<T, Executor>> sweep;
   sweep.reserve(chunks);
@@ -883,6 +916,7 @@ async_inclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
         LOG("downsweep (" << this_begin << ", " << this_end << ")");
         std::for_each(output + this_begin, output + this_end,
                       [=, &sums] (auto& t) {
+                        LOG("downsweep for_each t(" << t << ") sums(" << sums[chunk - 1] << ")");
                         t = op(std::move(t), sums[chunk - 1]);
                       });
         return T(*(output + this_end - 1));
@@ -916,7 +950,7 @@ int main()
   for (std::size_t i = 0; i < u.size(); ++i)
     std::cout << "initial u[" << i << "]: " << u[i] << "\n";
 
-  std::inclusive_scan(u.begin(), u.end(), u.begin(), std::plus{}, 0);
+  std::exclusive_scan(u.begin(), u.end(), u.begin(), 0, std::plus{});
 
   for (std::size_t i = 0; i < u.size(); ++i)
     std::cout << "gold u[" << i << "]: " << u[i] << "\n";
@@ -927,8 +961,8 @@ int main()
   {
     unbounded_depth_task_manager tm(8);
 
-    async_inclusive_scan(tm.get_executor(),
-                         u.begin(), u.end(), u.begin(), std::plus{}, 0,
+    async_exclusive_scan(tm.get_executor(),
+                         u.begin(), u.end(), u.begin(), 0, std::plus{},
                          4).get();
   }
 
