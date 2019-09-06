@@ -15,26 +15,49 @@
 #include <coroutine>
 #include <algorithm>
 #include <random>
+#include <chrono>
 
-#if 0//!defined(NDEBUG) && !defined(__NO_LOGGING)
-  #define LOG(...)                                                            \
+#if !defined(NDEBUG) && !defined(__NO_TASKING_LOGGING)
+  #define TASKLOG(...)                                                        \
     {                                                                         \
       std::ostringstream stm;                                                 \
-      stm << __FUNCTION__ << ": " << __VA_ARGS__ << "\n";                     \
+      stm << "tasking: "                                                      \
+          << __FILE__ << ":" << __LINE__ << ":" << __FUNCTION__ << ": "       \
+          << __VA_ARGS__ << "\n";                                             \
       std::cout << stm.str();                                                 \
     }                                                                         \
     /**/
 #else
-  #define LOG(...)
+  #define TASKLOG(...)
 #endif
 
-  #define RLOG(...)                                                            \
+#if !defined(NDEBUG) && !defined(__NO_SYNCHRONIZATION_LOGGING)
+  #define SYNCLOG(...)                                                        \
     {                                                                         \
       std::ostringstream stm;                                                 \
-      stm << __FUNCTION__ << ": " << __VA_ARGS__ << "\n";                     \
+      stm << "synchronization: "                                              \
+          << __FILE__ << ":" << __LINE__ << ":" << __FUNCTION__ << ": "       \
+          << __VA_ARGS__ << "\n";                                             \
       std::cout << stm.str();                                                 \
     }                                                                         \
     /**/
+#else
+  #define SYNCLOG(...)
+#endif
+
+#if !defined(NDEBUG) && !defined(__NO_ALGORITHM_LOGGING)
+  #define ALGOLOG(...)                                                        \
+    {                                                                         \
+      std::ostringstream stm;                                                 \
+      stm << "algorithm: "                                                    \
+          << __FILE__ << ":" << __LINE__ << ":" << __FUNCTION__ << ": "       \
+          << __VA_ARGS__ << "\n";                                             \
+      std::cout << stm.str();                                                 \
+    }                                                                         \
+    /**/
+#else
+  #define ALGOLOG(...)
+#endif
 
 // TODO: Use barrier. Ideas:
 //       - Synchronize with outstanding work?
@@ -184,7 +207,7 @@ public:
   constexpr concurrent_unbounded_queue() = default;
 
   ~concurrent_unbounded_queue() {
-    LOG("destroying queue");
+    TASKLOG("destroying queue");
   }
 
   // TODO: Lift common queue mutual exclusion code from enqueue variants.
@@ -217,18 +240,18 @@ public:
   // Attempt to dequeue one entry.
   std::optional<T> try_dequeue() {
     std::optional<T> tmp;
-    LOG("entered, about to items_produced.acquire()");
+    TASKLOG("entered, about to items_produced.acquire()");
     if (!items_produced.try_acquire())
       return tmp;
-    LOG("items_produced.acquire() succeeded");
+    TASKLOG("items_produced.acquire() succeeded");
     {
       std::scoped_lock l(items_mtx);
-      LOG("lock acquired");
+      TASKLOG("lock acquired");
       assert(!items.empty());
       tmp = std::move(items.front());
       items.pop();
     }
-    LOG("lock released, about to remaining_space.release()");
+    TASKLOG("lock released, about to remaining_space.release()");
     return std::move(*tmp);
   }
 
@@ -238,18 +261,18 @@ public:
     std::chrono::duration<Rep, Period> const& rel_time
   ) {
     std::optional<T> tmp;
-    LOG("entered, about to items_produced.acquire()");
+    TASKLOG("entered, about to items_produced.acquire()");
     if (!items_produced.try_acquire_for(rel_time))
       return tmp;
-    LOG("items_produced.acquire() succeeded");
+    TASKLOG("items_produced.acquire() succeeded");
     {
       std::scoped_lock l(items_mtx);
-      LOG("lock acquired");
+      TASKLOG("lock acquired");
       assert(!items.empty());
       tmp = std::move(items.front());
       items.pop();
     }
-    LOG("lock released, about to remaining_space.release()");
+    TASKLOG("lock released, about to remaining_space.release()");
     return std::move(*tmp);
   }
 };
@@ -273,7 +296,7 @@ private:
         active_task_count.fetch_sub(1, std::memory_order_release);
       }
     }
-    LOG("worker thread beginning shutdown");
+    TASKLOG("worker thread beginning shutdown");
     // We've gotten a stop request, but there may still be work in the queue,
     // so let's clear it out.
     while (true) {
@@ -283,9 +306,9 @@ private:
       else if (0 == active_task_count.load(std::memory_order_acquire))
         break;
     }
-    LOG("worker thread has shutdown; arriving at latch");
+    TASKLOG("worker thread has shutdown; arriving at latch");
     exit_latch.arrive_and_wait();
-    LOG("worker thread has shutdown; arrived at latch");
+    TASKLOG("worker thread has shutdown; arrived at latch");
   }
 
 public:
@@ -368,7 +391,7 @@ public:
 
   template <typename U>
   void set_value(U u) {
-    LOG(this << ": setting value");
+    SYNCLOG(this << ": setting value");
     fire_once<void(T&&)> tmp;
     fire_once<void()> oc;
     {
@@ -376,7 +399,7 @@ public:
       assert(!consumed);
       assert(!std::holds_alternative<T>(state));
       if (std::holds_alternative<std::monostate>(state)) {
-        LOG(this << "storing value; consumer will execute continuation");
+        SYNCLOG(this << ": storing value; consumer will execute continuation");
         // We're empty, so store the value.
         state = std::move(u);
       }
@@ -388,18 +411,18 @@ public:
       oc = std::move(on_completed);
     }
     if (tmp) {
-      LOG(this << "found a continuation; producer will execute it");
+      SYNCLOG(this << ": found a continuation; producer will execute it");
       std::move(tmp)(std::move(u));
     }
     if (oc) {
-      LOG(this << "producer running on_completed");
+      SYNCLOG(this << ": producer running on_completed");
       std::move(oc)();
     }
   }
 
   template <typename Invocable>
   void set_continuation(Invocable&& f) {
-    LOG(this << "setting continuation");
+    SYNCLOG(this << ": setting continuation");
     std::optional<T> tmp;
     fire_once<void()> oc;
     {
@@ -407,7 +430,7 @@ public:
       assert(!consumed);
       assert(!std::holds_alternative<fire_once<void(T&&)>>(state));
       if (std::holds_alternative<std::monostate>(state)) {
-        LOG(this << "storing continuation; producer will execute it");
+        SYNCLOG(this << ": storing continuation; producer will execute it");
         // We're empty, so store the continuation.
         state = std::forward<Invocable>(f);
       }
@@ -419,10 +442,10 @@ public:
       }
     }
     if (tmp) {
-      LOG(this << "found a value; consumer will execute continuation");
+      SYNCLOG(this << ": found a value; consumer will execute continuation");
       std::forward<Invocable>(f)(std::move(*tmp));
       if (oc) {
-        LOG(this << "consumer running on_completed");
+        SYNCLOG(this << ": consumer running on_completed");
         std::move(oc)();
       }
     }
@@ -430,13 +453,13 @@ public:
 
   template <typename Invocable>
   void set_on_completed(Invocable&& f) {
-    LOG(this << "setting on_completed");
+    SYNCLOG(this << ": setting on_completed");
     bool run_on_completed = false;
     {
       std::scoped_lock l(mtx);
       assert(!on_completed);
       if (std::holds_alternative<std::monostate>(state)) {
-        LOG(this << "storing on_completed; producer will execute it");
+        SYNCLOG(this << ": storing on_completed; producer will execute it");
         // We're empty, so store the continuation.
         on_completed = std::forward<Invocable>(f);
       }
@@ -446,7 +469,7 @@ public:
       }
     }
     if (run_on_completed) {
-      LOG(this << "found a value; consumer will execute on_completed");
+      SYNCLOG(this << ": found a value; consumer will execute on_completed");
       std::forward<Invocable>(f)();
     }
   }
@@ -490,10 +513,12 @@ public:
   // Precondition: Future has not been retrieved yet.
   template <typename Executor>
   unique_future<T, std::decay_t<Executor>> get_future(Executor&& exec) {
-    LOG("retrieving future");
+    SYNCLOG("retrieving future");
     deferred_data_allocation();
     future_retrieved = true;
-    return unique_future<T, std::decay_t<Executor>>(data, std::forward<Executor>(exec));
+    return unique_future<T, std::decay_t<Executor>>(
+      data, std::forward<Executor>(exec)
+    );
   }
 
   template <typename U>
@@ -502,20 +527,6 @@ public:
     data->set_value(std::forward<U>(u));
   }
 };
-
-template <typename T, typename Executor>
-T unique_future_await_resume(unique_future<T, Executor>& f) {
-  assert(f.ready());
-  return *f.try_get();
-}
-
-template <typename T, typename Executor0, typename Executor1>
-T unique_future_await_resume(unique_future<unique_future<T, Executor0>, Executor1>& f) {
-  assert(f.ready());
-  auto g = *f.try_get();
-  assert(g.ready());
-  return *std::move(g).try_get();
-}
 
 template <typename T>
 struct is_unique_future : std::false_type {};
@@ -572,10 +583,10 @@ public:
     data->set_continuation(
       [uexec, f = std::forward<Invocable>(f)]
       (T&& t) mutable {
-        LOG("enqueuing invocation of continuation");
+        SYNCLOG("enqueuing invocation of continuation");
         uexec.execute(
           [f = std::move(f), t = std::move(t)] () mutable  {
-            LOG("invoking then continuation");
+            SYNCLOG("invoking then continuation");
             std::invoke(std::move(f), std::move(t));
           }
         );
@@ -593,10 +604,10 @@ public:
     data->set_continuation(
       [uexec, f = std::forward<Invocable>(f), p = std::move(p)]
       (T&& t) mutable {
-        LOG("enqueuing invocation of continuation");
+        SYNCLOG("enqueuing invocation of continuation");
         uexec.execute(
           [f = std::move(f), p = std::move(p), t = std::move(t)] () mutable  {
-            LOG("invoking then continuation");
+            SYNCLOG("invoking then continuation");
             p.set(std::invoke(std::move(f), std::move(t)));
           }
         );
@@ -670,7 +681,7 @@ public:
     // TODO: Should this be using `then`?
     data->set_continuation(
       [&] (T&& t) {
-        LOG("retrieving value");
+        SYNCLOG("retrieving value");
         v = std::move(t);
         sem.release();
       }
@@ -701,7 +712,8 @@ public:
   }
 
   auto await_resume() {
-    return unique_future_await_resume(*this);
+    assert(ready());
+    return *try_get();
   }
 
   Executor executor() {
@@ -737,7 +749,7 @@ struct coroutine_traits<unique_future<T, Executor>, Executor, Args...>
 
     template <typename U>
     void return_value(U&& u) {
-      LOG("setting return_value");
+      SYNCLOG("setting return_value");
       this->set(std::forward<U>(u));
     }
 
@@ -787,7 +799,7 @@ auto when_all(Executor0 exec, std::vector<unique_future<T, Executor1>>& fs) {
     [exec, results, p = std::move(p)] () mutable {
       exec.execute(
         [results, p = std::move(p)] () mutable {
-          LOG("finalizing barrier");
+          SYNCLOG("finalizing barrier");
           p.set(std::move(*results));
         }
       );
@@ -801,7 +813,7 @@ auto when_all(Executor0 exec, std::vector<unique_future<T, Executor1>>& fs) {
     fs[i].submit(
       exec,
       [i, results, barrier] (T&& t) mutable {
-        LOG("assigning when_all result[" << i << "]");
+        SYNCLOG("assigning when_all result[" << i << "]");
         (*results)[i] = std::move(t);
         barrier->arrive_and_drop();
       }
@@ -813,8 +825,8 @@ auto when_all(Executor0 exec, std::vector<unique_future<T, Executor1>>& fs) {
 
 namespace std {
 
-template <typename InputIterator, typename T, typename BinaryOperation>
-T reduce(InputIterator first, InputIterator last, T init, BinaryOperation op)
+template <typename InputIt, typename T, typename BinaryOp>
+T reduce(InputIt first, InputIt last, T init, BinaryOp op)
 {
   for (; first != last; ++first) {
     init = op(std::move(init), *first);
@@ -822,17 +834,17 @@ T reduce(InputIterator first, InputIterator last, T init, BinaryOperation op)
   return init;
 }
 
-template <typename InputIterator, typename T>
-T reduce(InputIterator first, InputIterator last, T init)
+template <typename InputIt, typename T>
+T reduce(InputIt first, InputIt last, T init)
 {
   for (; first != last; ++first)
     init = std::move(init) + *first;
   return init;
 }
 
-template <typename InputIterator, typename OutputIterator, typename T, typename BinaryOp>
-OutputIterator exclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, T init, BinaryOp op)
+template <typename InputIt, typename OutputIt, typename T, typename BinaryOp>
+OutputIt exclusive_scan(InputIt first, InputIt last,
+                              OutputIt result, T init, BinaryOp op)
 {
   if (first != last) {
     T saved = init;
@@ -846,16 +858,17 @@ OutputIterator exclusive_scan(InputIterator first, InputIterator last,
   return result;
 }
 
-template <typename InputIterator, typename OutputIterator, typename T>
-OutputIterator exclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, T init)
+template <typename InputIt, typename OutputIt, typename T>
+OutputIt exclusive_scan(InputIt first, InputIt last,
+                              OutputIt result, T init)
 {
   return exclusive_scan(first, last, result, init, std::plus{});
 }
 
-template <typename InputIterator, typename OutputIterator, typename BinaryOp, typename T>
-OutputIterator inclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, BinaryOp op, T init)
+template <typename InputIt, typename OutputIt, typename BinaryOp,
+          typename T>
+OutputIt inclusive_scan(InputIt first, InputIt last,
+                              OutputIt result, BinaryOp op, T init)
 {
   for (; first != last; ++first, (void) ++result) {
     init = op(init, *first);
@@ -864,12 +877,12 @@ OutputIterator inclusive_scan(InputIterator first, InputIterator last,
   return result;
 }
 
-template <typename InputIterator, typename OutputIterator, typename BinaryOp>
-OutputIterator inclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, BinaryOp op)
+template <typename InputIt, typename OutputIt, typename BinaryOp>
+OutputIt inclusive_scan(InputIt first, InputIt last,
+                              OutputIt result, BinaryOp op)
 {
   if (first != last) {
-    typename std::iterator_traits<InputIterator>::value_type init = *first;
+    typename std::iterator_traits<InputIt>::value_type init = *first;
     *result++ = init;
     if (++first != last)
       return inclusive_scan(first, last, result, op, init);
@@ -898,7 +911,7 @@ async_reduce(Executor exec, InputIt first, InputIt last,
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("sweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("sweep chunk(" << this_begin << ", " << this_end << ")");
         return std::reduce(first + this_begin, first + this_end, T{}, op);
       }
     ));
@@ -906,10 +919,22 @@ async_reduce(Executor exec, InputIt first, InputIt last,
   auto sums = co_await when_all(exec, sweep);
 
   for (std::uint64_t chunk = 0; chunk < chunks; ++chunk)
-    LOG("sums[" << chunk << "] == " << sums[chunk]);
+    ALGOLOG("sums[" << chunk << "](" << sums[chunk] << ")");
 
   // We add in init here.
   co_return std::reduce(sums.begin(), sums.end(), init, op);
+}
+
+template <typename Executor, typename InputIt>
+auto async_max_element_value(Executor exec, InputIt first, InputIt last,
+                             std::uint64_t chunk_size)
+{
+  using T = typename std::iterator_traits<InputIt>::value_type;
+  if (first == last) return ready_future(exec, T{});
+  auto tmp = *first++;
+  return async_reduce(exec, first, last, std::move(tmp),
+                      [] (auto l, auto r) { return std::max(l, r); },
+                      chunk_size);
 }
 
 struct unused {};
@@ -932,7 +957,7 @@ async_for_each(Executor exec, InputIt first, InputIt last,
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("sweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("sweep chunk(" << this_begin << ", " << this_end << ")");
         std::for_each(first + this_begin, first + this_end, op);
         return unused{};
       }
@@ -962,7 +987,7 @@ async_for_loop(Executor exec, InputIt first, InputIt last,
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("sweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("sweep chunk(" << this_begin << ", " << this_end << ")");
         for (std::uint64_t i = this_begin; i < this_end; ++i)
           op(i, first[i]);
         return unused{};
@@ -976,7 +1001,8 @@ async_for_loop(Executor exec, InputIt first, InputIt last,
 
 // FIXME: Lift this with async_for_each
 // TODO: Test this for size = 0, size = 1, size = 2, etc.
-template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp>
+template <typename Executor, typename InputIt, typename OutputIt,
+          typename BinaryOp>
 unique_future<OutputIt, Executor>
 async_transform(Executor exec, InputIt first, InputIt last, OutputIt output,
                 BinaryOp op, std::uint64_t chunk_size)
@@ -993,7 +1019,7 @@ async_transform(Executor exec, InputIt first, InputIt last, OutputIt output,
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("sweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("sweep chunk(" << this_begin << ", " << this_end << ")");
         return std::transform(first + this_begin, first + this_end,
                               output + this_begin, op);
       }
@@ -1016,7 +1042,8 @@ async_copy(Executor exec, InputIt first, InputIt last, OutputIt output,
 
 // TODO: Test this for size = 0, size = 1, size = 2, etc.
 // TODO: Test this for small chunk sizes.
-template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp, typename T>
+template <typename Executor, typename InputIt, typename OutputIt,
+          typename BinaryOp, typename T>
 unique_future<OutputIt, Executor>
 async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
                      T init, BinaryOp op, std::size_t chunk_size)
@@ -1033,7 +1060,7 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("upsweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("upsweep chunk(" << this_begin << ", " << this_end << ")");
         // Save the value of the final element which we need to add into the
         // sum we return, just in case this is an in-place scan.
         auto const last_element = first[this_end - 1];
@@ -1048,13 +1075,13 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
   auto sums = co_await when_all(exec, sweep);
 
   for (std::size_t chunk = 0; chunk < chunks; ++chunk)
-    LOG("sums[" << chunk << "] == " << sums[chunk]);
+    ALGOLOG("pre top level scan sums[" << chunk << "](" << sums[chunk] << ")");
 
   // We add in init here.
   std::inclusive_scan(sums.begin(), sums.end(), sums.begin(), op, init);
 
   for (std::size_t chunk = 0; chunk < chunks; ++chunk)
-    LOG("scanned sums[" << chunk << "] == " << sums[chunk]);
+    ALGOLOG("post top level scan sums[" << chunk << "](" << sums[chunk] << ")");
 
   sweep.clear();
 
@@ -1066,10 +1093,12 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
       [=, &sums] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("downsweep (" << this_begin << ", " << this_end << ")");
+        ALGOLOG("downsweep chunk(" << this_begin << ", " << this_end << ")");
         std::for_each(output + this_begin, output + this_end,
                       [=, &sums] (auto& t) {
-                        LOG("downsweep for_each t(" << t << ") sums(" << sums[chunk - 1] << ")");
+                        ALGOLOG("downsweep for_each t(" << t
+                                << ") sums[" << chunk - 1
+                                << "](" << sums[chunk - 1] << ")");
                         t = op(std::move(t), sums[chunk - 1]);
                       });
         return T(*(output + this_end - 1));
@@ -1083,7 +1112,8 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
 
 template <typename Executor, typename InputIt, typename OutputIt>
 unique_future<std::uint64_t, Executor>
-async_radix_sort_split(Executor exec, InputIt first, InputIt last, OutputIt output,
+async_radix_sort_split(Executor exec, InputIt first, InputIt last,
+                       OutputIt output,
                        std::uint64_t bit, std::uint64_t chunk_size)
 {
   std::uint64_t const elements = std::distance(first, last);
@@ -1097,9 +1127,8 @@ async_radix_sort_split(Executor exec, InputIt first, InputIt last, OutputIt outp
                            [=] (auto t) { return !(t & (1 << bit)); },
                            chunk_size);
 
-  for (std::uint64_t i = 0; i < e.size(); ++i) {
-    RLOG("radix sort 0s count " << i << " " << e[i]);
-  }
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    ALGOLOG("pre scan zeros_found[" << i << "](" << e[i] << ")");
 
   // Count the last one if it's set, as we won't get it on the scan.
   std::uint64_t total_falses = e.back();
@@ -1110,39 +1139,43 @@ async_radix_sort_split(Executor exec, InputIt first, InputIt last, OutputIt outp
 
   total_falses += e.back();
 
-  for (std::uint64_t i = 0; i < e.size(); ++i) {
-    RLOG("radix sort scans " << i << " " << e[i]);
-  }
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    ALGOLOG("post scan zeros_found[" << i << "](" << e[i] << ")");
 
-  RLOG("total_falses == " << total_falses);
+  ALGOLOG("total_falses(" << total_falses << ")");
 
   // Compute destination indices.
   co_await async_for_loop(exec,
                           e.begin(), e.end(),
                           [=] (std::uint64_t i, auto& x) {
                             if (first[i] & (1 << bit)) {
-                              RLOG("adjusting destination first[" << i << "] == " << first[i] << " from " << x << " to " << (i - x + total_falses));
-                              x = i - x + total_falses;
+                              ALGOLOG("adjusting destination first["
+                                      << i << "](" << first[i] << ") from e["
+                                      << i << "](" << x << ") to e["
+                                      << i << "](" << (i - x + total_falses)
+                                      << ")");
                               assert(i - x + total_falses < elements);
+                              x = i - x + total_falses;
                             }
                           },
                           chunk_size);
 
   for (std::uint64_t i = 0; i < e.size(); ++i) {
-    RLOG("radix sort destinations " << i << " " << e[i]);
+    ALGOLOG("destinations[" << i << "](" << e[i] << ")");
   }
 
   // Scatter.
   co_await async_for_loop(exec,
                           first, last,
                           [=, &e] (std::uint64_t i, auto& x) {
-                            RLOG("scatter first[" << i << "] == " << first[i] << " (" << x << ") to " << e[i]);
+                            ALGOLOG("scatter first[" << i << "](" << first[i]
+                                    << ") to e[" << i << "](" << e[i] << ")");
                             output[e[i]] = x;
                           },
                           chunk_size);
 
   for (std::uint64_t i = 0; i < e.size(); ++i) {
-    RLOG("radix sort result " << i << " " << output[i]);
+    ALGOLOG("result[" << i << "](" << output[i] << ")");
   }
 
   co_return total_falses;
@@ -1150,7 +1183,8 @@ async_radix_sort_split(Executor exec, InputIt first, InputIt last, OutputIt outp
 
 template <typename Executor, typename InputIt>
 unique_future<std::uint64_t, Executor>
-async_radix_sort(Executor exec, InputIt first, InputIt last, std::uint64_t chunk_size)
+async_radix_sort(Executor exec, InputIt first, InputIt last,
+                 std::uint64_t chunk_size)
 {
   using T = typename std::iterator_traits<InputIt>::value_type;
 
@@ -1158,44 +1192,45 @@ async_radix_sort(Executor exec, InputIt first, InputIt last, std::uint64_t chunk
 
   std::uint64_t const elements = std::distance(first, last);
 
-  RLOG("elements          == " << elements);
+  ALGOLOG("elements(" << elements << ")");
 
   // Find the smallest number of leading zeros in the input.
   std::uint64_t const min_leading_zeros =
-    co_await async_reduce(exec,
-                          first, last, 0,
-                          [] (auto l, auto r) {
-                            // `__builtin_clz` has UB if the input is 0, thus the | 1.
-                            return std::min(std::uint64_t(__builtin_clzll(l | 1)),
-                                            std::uint64_t(__builtin_clzll(r | 1)));
-                          },
-                          chunk_size);
+    // `__builtin_clz` has UB if the input is 0, thus the | 1.
+    __builtin_clzll(
+      co_await async_max_element_value(exec, first, last, chunk_size) | 1
+    );
 
   assert(min_leading_zeros <= element_bits);
   std::uint64_t const max_set_bit = element_bits - min_leading_zeros;
 
-  RLOG("element_bits      == " << element_bits);
-  RLOG("min_leading_zeros == " << min_leading_zeros);
-  RLOG("max_set_bit       == " << max_set_bit);
+  ALGOLOG("element_bits(" << element_bits
+          << ") min_leading_zeros(" << min_leading_zeros
+          << ") max_set_bit(" << max_set_bit << ")");
 
   assert(elements);
   std::vector<std::uint64_t> v(elements);
 
   for (std::uint64_t bit = 0; bit < max_set_bit; ++bit) {
-    RLOG("pass " << bit << " of " << max_set_bit);
     if (bit % 2 == 0) {
-      co_await async_radix_sort_split(exec, first, last, v.begin(), bit, chunk_size);
+      co_await async_radix_sort_split(exec,
+                                      first, last, v.begin(),
+                                      bit, chunk_size);
       for (std::uint64_t i = 0; i < elements; ++i)
-        RLOG("pass " << bit << " of " << max_set_bit << " u[" << i << "] == " << v[i]);
+        ALGOLOG("pass(" << bit << ") of max_pass(" << max_set_bit - 1
+                << ") v[" << i << "](" << v[i] << ")");
     }
     else {
-      co_await async_radix_sort_split(exec, v.begin(), v.end(), first, bit, chunk_size);
+      co_await async_radix_sort_split(exec,
+                                      v.begin(), v.end(), first,
+                                      bit, chunk_size);
       for (std::uint64_t i = 0; i < elements; ++i)
-        RLOG("pass " << bit << " of " << max_set_bit << " u[" << i << "] == " << first[i]);
+        ALGOLOG("pass(" << bit << ") of max_pass(" << max_set_bit - 1
+                << ") first[" << i << "](" << first[i] << ")");
     }
   }
 
-  if (max_set_bit % 2 == 0)
+  if (max_set_bit % 2 != 0)
     // Gotta do a copy back.
     co_await async_copy(exec, v.begin(), v.end(), first, chunk_size);
 
@@ -1204,35 +1239,68 @@ async_radix_sort(Executor exec, InputIt first, InputIt last, std::uint64_t chunk
 
 int main()
 {
-  std::vector<std::uint64_t> u(32);
+  constexpr std::uint64_t threads    = 6;
+  constexpr std::uint64_t elements   = 2 << 17;
+  constexpr std::uint64_t chunk_size = 2 << 11;
+  constexpr std::uint64_t chunks     = (1 + ((elements - 1) / chunk_size));
+
+  std::cout << "threads(" << threads
+            << ") elements(" << elements
+            << ") chunk_size(" << chunk_size
+            << ") chunks(" << chunks << ")\n";
+
+  std::vector<std::uint64_t> u(elements);
+  std::vector<std::uint64_t> gold(elements);
 
   {
     std::mt19937 g(1337);
     std::iota(u.begin(), u.end(), 0);
     std::shuffle(u.begin(), u.end(), g);
+    std::copy(u.begin(), u.end(), gold.begin());
   }
 
-  for (std::uint64_t i = 0; i < u.size(); ++i)
-    std::cout << "initial u[" << i << "]: " << u[i] << "\n";
+  if (512 >= elements)
+    for (std::uint64_t i = 0; i < elements; ++i)
+      std::cout << "initial u[" << i << "](" << u[i] << ")\n";
 
-  std::sort(u.begin(), u.end());
+  std::uint64_t passes = 0;
 
-  for (std::uint64_t i = 0; i < u.size(); ++i)
-    std::cout << "gold u[" << i << "]: " << u[i] << "\n";
+  double parallel_time = 0.0;
 
   {
-    std::mt19937 g(1337);
-    std::iota(u.begin(), u.end(), 0);
-    std::shuffle(u.begin(), u.end(), g);
+    unbounded_depth_task_manager tm(threads);
+
+    auto const start = std::chrono::high_resolution_clock::now();
+    passes = async_radix_sort(tm.get_executor(),
+                              u.begin(), u.end(), chunk_size).get();
+    auto const end   = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> time(end - start);
+    parallel_time = time.count();
   }
+
+  double serial_time = 0.0;
 
   {
-    unbounded_depth_task_manager tm(8);
+    auto const start = std::chrono::high_resolution_clock::now();
+    std::sort(gold.begin(), gold.end());
+    auto const end   = std::chrono::high_resolution_clock::now();
 
-    async_radix_sort(tm.get_executor(), u.begin(), u.end(), 32).get();
+    std::chrono::duration<double> time(end - start);
+    serial_time = time.count();
   }
 
-  for (std::uint64_t i = 0; i < u.size(); ++i)
-    std::cout << "observed u[" << i << "]: " << u[i] << "\n";
+  std::cout << "radix sort passes(" << passes << ")\n";
+
+  if (!std::equal(u.begin(), u.end(), gold.begin()))
+    std::cout << "OBSERVED RESULT FAILED COMPARISON WITH GOLD\n";
+
+  if (512 >= elements)
+    for (std::uint64_t i = 0; i < elements; ++i)
+      std::cout << "observed u[" << i << "](" << u[i]
+                << ") gold[" << i << "](" << gold[i] << ")\n";
+
+  std::cout << "serial_time(" << serial_time
+            << " [sec]) parallel_time(" << parallel_time << " [sec])\n";
 }
 

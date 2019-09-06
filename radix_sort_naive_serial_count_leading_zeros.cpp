@@ -131,7 +131,7 @@ int main() {
 //    0b100, 0b111, 0b010, 0b110, 0b011, 0b101, 0b001, 0b000
 //  };
 
-  std::vector<std::uint64_t> u(32);
+  std::vector<std::uint64_t> u(8);
   {
     std::mt19937 g(1337);
     std::iota(u.begin(), u.end(), 0);
@@ -144,12 +144,8 @@ int main() {
 
   // Find the smallest number of leading zeros in the input.
   std::uint64_t const min_leading_zeros =
-    std::reduce(u.begin(), u.end(), 0,
-                [] (auto l, auto r) {
-                  // `__builtin_clz` has UB if the input is 0, thus the | 1.
-                  return std::min(std::uint64_t(__builtin_clzll(l | 1)),
-                                  std::uint64_t(__builtin_clzll(r | 1)));
-                });
+    // `__builtin_clzll` has UB if the input is 0, thus the | 1.
+    __builtin_clzll(*std::max_element(u.begin(), u.end()) | 1);
 
   assert(min_leading_zeros <= element_bits);
   std::uint64_t const max_set_bit = element_bits - min_leading_zeros;
@@ -171,12 +167,16 @@ int main() {
     std::swap(u, v);
   }
 
-  if (max_set_bit % 2 == 0)
-    // Gotta swap back one more time.
-    std::swap(u, v);
+//  if (max_set_bit % 2 != 0)
+//    // Gotta swap back one more time.
+//    std::swap(u, v);
 
   for (std::uint64_t i = 0; i < u.size(); ++i)
-    std::cout << std::bitset<element_bits>(u[i]) << " " << u[i] << "\n";
+    std::cout << "u " << std::bitset<element_bits>(u[i]) << " " << u[i] << "\n";
+  std::cout << "\n";
+
+  for (std::uint64_t i = 0; i < u.size(); ++i)
+    std::cout << "v " << std::bitset<element_bits>(v[i]) << " " << v[i] << "\n";
   std::cout << "\n";
 }
 
