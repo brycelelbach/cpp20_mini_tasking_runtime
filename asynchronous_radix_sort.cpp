@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
+#include <cstdlib>
 
 #if !defined(NDEBUG) && !defined(__NO_TASKING_LOGGING)
   #define TASKLOG(...)                                                        \
@@ -1237,25 +1238,36 @@ async_radix_sort(Executor exec, InputIt first, InputIt last,
   co_return max_set_bit;
 }
 
-int main()
+int main(int argc, char** argv)
 {
-  constexpr std::uint64_t threads    = 6;
-  constexpr std::uint64_t elements   = 2 << 17;
-  constexpr std::uint64_t chunk_size = 2 << 11;
-  constexpr std::uint64_t chunks     = (1 + ((elements - 1) / chunk_size));
+  using T = std::uint64_t;
+
+  std::uint64_t threads    = 6;
+  std::uint64_t elements   = 2 << 23;
+  std::uint64_t chunk_size = 2 << 16;
+
+  if (2 <= argc) threads    = std::atoll(argv[1]);
+  if (3 <= argc) elements   = std::atoll(argv[2]);
+  if (4 <= argc) chunk_size = std::atoll(argv[3]);
+
+  double const elements_size_gb = sizeof(T) * CHAR_BIT * elements / 1e9;
+  std::uint64_t const chunks = (1 + ((elements - 1) / chunk_size));
 
   std::cout << "threads(" << threads
             << ") elements(" << elements
-            << ") chunk_size(" << chunk_size
+            << ") elements_size(" << elements_size_gb
+            << " [GB]) chunk_size(" << chunk_size
             << ") chunks(" << chunks << ")\n";
 
   std::vector<std::uint64_t> u(elements);
   std::vector<std::uint64_t> gold(elements);
 
   {
-    std::mt19937 g(1337);
-    std::iota(u.begin(), u.end(), 0);
-    std::shuffle(u.begin(), u.end(), g);
+    std::mt19937 gen(1337);
+    //std::iota(u.begin(), u.end(), 0);
+    //std::shuffle(u.begin(), u.end(), gen);
+    std::uniform_int_distribution<std::uint64_t> dis(0, 128);
+    std::generate_n(u.begin(), elements, [&] { return dis(gen); });
     std::copy(u.begin(), u.end(), gold.begin());
   }
 
