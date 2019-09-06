@@ -866,7 +866,8 @@ OutputIterator inclusive_scan(InputIterator first, InputIterator last,
 template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp, typename T>
 unique_future<OutputIt, Executor>
 async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
-                     T init, BinaryOp op, std::size_t chunk_size) {
+                     T init, BinaryOp op, std::size_t chunk_size)
+{
   std::size_t const inputs   = std::distance(first, last);
   std::size_t const elements = inputs - 1;
   std::size_t const chunks   = (1 + ((elements - 1) / chunk_size)); // Round up.
@@ -889,9 +890,8 @@ async_exclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
         LOG("upsweep (" << this_begin << ", " << this_end << ")");
-        // FIXME: We need to pass in the intermediate type here.
-        return T(*--std::inclusive_scan(first + this_begin, first + this_end,
-                                        output + this_begin, op));
+        return *--std::inclusive_scan(first + this_begin, first + this_end,
+                                      output + this_begin, op, T{});
       }
     ));
 

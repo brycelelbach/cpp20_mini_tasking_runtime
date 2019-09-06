@@ -13,6 +13,7 @@
 #include <functional>
 #include <optional>
 #include <coroutine>
+#include <algorithm>
 
 #if !defined(NDEBUG) && !defined(__NO_LOGGING)
   #define LOG(...)                                                            \
@@ -812,54 +813,44 @@ unique_future<std::uint64_t, Executor> afibonacci(Executor exec, std::uint64_t n
 
 namespace std {
 
-template <typename InputIterator, typename OutputIterator, typename BinaryOp, typename T>
-OutputIterator inclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, BinaryOp op, T init)
+template <typename InputIterator, typename T, typename BinaryOperation>
+T accumulate(InputIterator first, InputIterator last, T init, BinaryOperation op)
 {
-  for (; first != last; ++first, (void) ++result) {
-    init = op(init, *first);
-    *result = init;
+  for (; first != last; ++first) {
+    init = op(std::move(init), *first);
   }
-  return result;
+  return init;
 }
 
-template <typename InputIterator, typename OutputIterator, typename BinaryOp>
-OutputIterator inclusive_scan(InputIterator first, InputIterator last,
-                              OutputIterator result, BinaryOp op)
+template <typename InputIterator, typename T>
+T accumulate(InputIterator first, InputIterator last, T init)
 {
-  if (first != last) {
-    typename std::iterator_traits<InputIterator>::value_type init = *first;
-    *result++ = init;
-    if (++first != last)
-      return inclusive_scan(first, last, result, op, init);
-  }
-
-  return result;
+  for (; first != last; ++first)
+    init = std::move(init) + *first;
+  return init;
 }
 
 } // namespace std
 
-template <typename Executor, typename InputIt, typename OutputIt, typename BinaryOp, typename T>
-unique_future<OutputIt, Executor>
-async_inclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output,
-                     BinaryOp op, T init, std::size_t chunk_size)
+// TODO: Test this for size = 0, size = 1, size = 2, etc.
+template <typename Executor, typename InputIt, typename BinaryOp, typename T>
+unique_future<T, Executor>
+async_reduce(Executor exec, InputIt first, InputIt last,
+             T init, BinaryOp op, std::size_t chunk_size)
 {
-  std::size_t const elements = std::distance(first, last);
+  std::size_t const elements   = std::distance(first, last);
   std::size_t const chunks   = (1 + ((elements - 1) / chunk_size)); // Round up.
 
   std::vector<unique_future<T, Executor>> sweep;
   sweep.reserve(chunks);
 
-  // Upsweep.
   for (std::size_t chunk = 0; chunk < chunks; ++chunk)
     sweep.emplace_back(async(exec,
       [=] {
         auto const this_begin = chunk * chunk_size;
         auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("upsweep (" << this_begin << ", " << this_end << ")");
-        // FIXME: We need to pass in the intermediate type here.
-        return *--std::inclusive_scan(first + this_begin, first + this_end,
-                                      output + this_begin, op, T{});
+        LOG("sweep (" << this_begin << ", " << this_end << ")");
+        return std::accumulate(first + this_begin, first + this_end, T{}, op);
       }
     ));
 
@@ -869,30 +860,7 @@ async_inclusive_scan(Executor exec, InputIt first, InputIt last, OutputIt output
     LOG("sums[" << chunk << "] == " << sums[chunk]);
 
   // We add in init here.
-  std::inclusive_scan(sums.begin(), sums.end(), sums.begin(), op, init);
-
-  sweep.clear();
-
-  // Downsweep.
-  for (std::size_t chunk = 1; chunk < chunks; ++chunk)
-    sweep.emplace_back(async(exec,
-      // Taking sums by reference is fine here; we're going to co_await on the
-      // futures, which will keep the current scope alive for them.
-      [=, &sums] {
-        auto const this_begin = chunk * chunk_size;
-        auto const this_end   = std::min(elements, (chunk + 1) * chunk_size);
-        LOG("downsweep (" << this_begin << ", " << this_end << ")");
-        std::for_each(output + this_begin, output + this_end,
-                      [=, &sums] (auto& t) {
-                        t = op(std::move(t), sums[chunk - 1]);
-                      });
-        return T(*(output + this_end - 1));
-      }
-    ));
-
-  co_await when_all(exec, sweep);
-
-  co_return output + elements;
+  co_return std::accumulate(sums.begin(), sums.end(), init, op);
 }
 
 // How is this not a thing?
@@ -917,23 +885,18 @@ int main()
   for (std::size_t i = 0; i < u.size(); ++i)
     std::cout << "initial u[" << i << "]: " << u[i] << "\n";
 
-  std::inclusive_scan(u.begin(), u.end(), u.begin(), std::plus{}, 0);
+  std::cout << "gold r: " << std::accumulate(u.begin(), u.end(), 0, std::plus{}) << "\n";
 
-  for (std::size_t i = 0; i < u.size(); ++i)
-    std::cout << "gold u[" << i << "]: " << u[i] << "\n";
-
-  u.clear();
-  std::fill_n(std::back_inserter(u), 128, 1);
+  std::uint64_t r = 0;
 
   {
     unbounded_depth_task_manager tm(8);
 
-    async_inclusive_scan(tm.get_executor(),
-                         u.begin(), u.end(), u.begin(), std::plus{}, 0,
-                         4).get();
+    r = async_reduce(tm.get_executor(),
+                 u.begin(), u.end(), 0, std::plus{},
+                 4).get();
   }
 
-  for (std::size_t i = 0; i < u.size(); ++i)
-    std::cout << "observed u[" << i << "]: " << u[i] << "\n";
+  std::cout << "observed r: " << r << "\n";
 }
 
