@@ -1195,7 +1195,10 @@ async_radix_sort(Executor exec, InputIt first, InputIt last,
 
   ALGOLOG("elements(" << elements << ")");
 
-  // Find the smallest number of leading zeros in the input.
+  if (0 == elements) co_return 0;
+
+  // Figure out how many passes we need to do by find the largest element in
+  // the input and determining its most significant set bit.
   std::uint64_t const min_leading_zeros =
     // `__builtin_clz` has UB if the input is 0, thus the | 1.
     __builtin_clzll(
@@ -1210,7 +1213,7 @@ async_radix_sort(Executor exec, InputIt first, InputIt last,
           << ") max_set_bit(" << max_set_bit << ")");
 
   assert(elements);
-  std::vector<std::uint64_t> v(elements);
+  std::vector<T> v(elements);
 
   for (std::uint64_t bit = 0; bit < max_set_bit; ++bit) {
     if (bit % 2 == 0) {
