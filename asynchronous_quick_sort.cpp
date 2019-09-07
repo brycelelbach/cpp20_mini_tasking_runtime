@@ -1418,7 +1418,7 @@ async_quick_sort(Executor exec, InputIt first, InputIt last)
     std::swap(*q, *p);
 
     auto left  = async(exec, async_quick_sort<Executor, InputIt>, exec, first, q);
-    auto right = async_quick_sort(exec, std::next(q), last);
+    auto right = async(exec, async_quick_sort<Executor, InputIt>, exec, std::next(q), last);
 
     co_await left;
     co_await right;
