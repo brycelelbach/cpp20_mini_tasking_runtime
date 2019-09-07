@@ -1241,6 +1241,72 @@ async_radix_sort(Executor exec, InputIt first, InputIt last,
   co_return max_set_bit;
 }
 
+template <typename InputIt, typename OutputIt>
+std::uint64_t
+radix_sort_split(InputIt first, InputIt last, OutputIt output, std::uint64_t bit)
+{
+  // TODO: This probably needs less storage.
+  std::vector<std::uint64_t> e(std::distance(first, last));
+
+  // Count 0s.
+  std::transform(first, last, e.begin(),
+                 [=] (auto t) { return !(t & (1 << bit)); });
+
+  // Count the last one if it's set, as we won't get it on the scan.
+  std::uint64_t total_falses = e.back();
+
+  std::exclusive_scan(e.begin(), e.end(), e.begin(), std::uint64_t(0));
+
+  total_falses += e.back();
+
+  // Compute destination indices.
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    if ((first[i] & (1 << bit))) e[i] = i - e[i] + total_falses;
+
+  // Scatter.
+  for (std::uint64_t i = 0; i < e.size(); ++i)
+    output[e[i]] = first[i];
+
+  return total_falses;
+}
+
+template <typename InputIt>
+std::uint64_t radix_sort(InputIt first, InputIt last)
+{
+  using T = typename std::iterator_traits<InputIt>::value_type;
+
+  constexpr std::uint64_t element_bits = sizeof(T) * CHAR_BIT;
+
+  std::uint64_t const elements = std::distance(first, last);
+
+  if (0 == elements) return 0;
+
+  // Figure out how many passes we need to do by find the largest element in
+  // the input and determining its most significant set bit.
+  std::uint64_t const min_leading_zeros =
+    // `__builtin_clz` has UB if the input is 0, thus the | 1.
+    __builtin_clzll(*std::max_element(first, last) | 1);
+
+  assert(min_leading_zeros <= element_bits);
+  std::uint64_t const max_set_bit = element_bits - min_leading_zeros;
+
+  assert(elements);
+  std::vector<T> v(elements);
+
+  for (std::uint64_t bit = 0; bit < max_set_bit; ++bit) {
+    if (bit % 2 == 0)
+      radix_sort_split(first, last, v.begin(), bit);
+    else
+      radix_sort_split(v.begin(), v.end(), first, bit);
+  }
+
+  if (max_set_bit % 2 != 0)
+    // Gotta do a copy back.
+    std::copy(v.begin(), v.end(), first);
+
+  return max_set_bit;
+}
+
 int main(int argc, char** argv)
 {
   using T = std::uint64_t;
@@ -1262,39 +1328,23 @@ int main(int argc, char** argv)
             << " [GB]) chunk_size(" << chunk_size
             << ") chunks(" << chunks << ")\n";
 
-  std::vector<std::uint64_t> u(elements);
   std::vector<std::uint64_t> gold(elements);
+  std::vector<std::uint64_t> radix_parallel(elements);
+  std::vector<std::uint64_t> radix_serial(elements);
 
   {
     std::mt19937 gen(1337);
-    //std::iota(u.begin(), u.end(), 0);
-    //std::shuffle(u.begin(), u.end(), gen);
     std::uniform_int_distribution<std::uint64_t> dis(0, 128);
-    std::generate_n(u.begin(), elements, [&] { return dis(gen); });
-    std::copy(u.begin(), u.end(), gold.begin());
+    std::generate_n(gold.begin(), elements, [&] { return dis(gen); });
+    std::copy(gold.begin(), gold.end(), radix_parallel.begin());
+    std::copy(gold.begin(), gold.end(), radix_serial.begin());
   }
 
   if (512 >= elements)
     for (std::uint64_t i = 0; i < elements; ++i)
-      std::cout << "initial u[" << i << "](" << u[i] << ")\n";
+      std::cout << "initial gold[" << i << "](" << gold[i] << ")\n";
 
-  std::uint64_t passes = 0;
-
-  double parallel_time = 0.0;
-
-  {
-    unbounded_depth_task_manager tm(threads);
-
-    auto const start = std::chrono::high_resolution_clock::now();
-    passes = async_radix_sort(tm.get_executor(),
-                              u.begin(), u.end(), chunk_size).get();
-    auto const end   = std::chrono::high_resolution_clock::now();
-
-    std::chrono::duration<double> time(end - start);
-    parallel_time = time.count();
-  }
-
-  double serial_time = 0.0;
+  double time_gold = 0.0;
 
   {
     auto const start = std::chrono::high_resolution_clock::now();
@@ -1302,20 +1352,57 @@ int main(int argc, char** argv)
     auto const end   = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> time(end - start);
-    serial_time = time.count();
+    time_gold = time.count();
   }
 
-  std::cout << "radix sort passes(" << passes << ")\n";
+  std::uint64_t passes_radix_serial = 0;
+  double time_radix_serial = 0.0;
 
-  if (!std::equal(u.begin(), u.end(), gold.begin()))
-    std::cout << "OBSERVED RESULT FAILED COMPARISON WITH GOLD\n";
+  {
+    auto const start = std::chrono::high_resolution_clock::now();
+    passes_radix_serial = radix_sort(radix_serial.begin(), radix_serial.end());
+    auto const end   = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> time(end - start);
+    time_radix_serial = time.count();
+  }
+
+  std::uint64_t passes_radix_parallel = 0;
+  double time_radix_parallel = 0.0;
+
+  {
+    unbounded_depth_task_manager tm(threads);
+
+    auto const start = std::chrono::high_resolution_clock::now();
+    passes_radix_parallel = async_radix_sort(tm.get_executor(),
+                                             radix_parallel.begin(),
+                                             radix_parallel.end(),
+                                             chunk_size).get();
+    auto const end   = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> time(end - start);
+    time_radix_parallel = time.count();
+  }
+
+  std::cout << "passes_radix_serial(" << passes_radix_serial
+            << ") passes_radix_parallel(" << passes_radix_parallel << ")\n";
+
+
+  if (!std::equal(gold.begin(), gold.end(), radix_serial.begin()))
+    std::cout << "SERIAL RADIX SORT RESULT FAILED COMPARISON WITH GOLD\n";
+  if (!std::equal(gold.begin(), gold.end(), radix_parallel.begin()))
+    std::cout << "PARALLEL RADIX SORT RESULT FAILED COMPARISON WITH GOLD\n";
 
   if (512 >= elements)
     for (std::uint64_t i = 0; i < elements; ++i)
-      std::cout << "observed u[" << i << "](" << u[i]
-                << ") gold[" << i << "](" << gold[i] << ")\n";
+      std::cout << "gold[" << i << "](" << gold[i]
+                << ") radix_serial[" << i << "](" << radix_serial[i]
+                << ") radix_parallel[" << i << "](" << radix_parallel[i]
+                << ")\n";
 
-  std::cout << "serial_time(" << serial_time
-            << " [sec]) parallel_time(" << parallel_time << " [sec])\n";
+  std::cout << "time_gold(" << time_gold
+            << " [sec]) time_radix_serial(" << time_radix_serial
+            << " [sec]) time_radix_parallel(" << time_radix_parallel
+            << " [sec])\n";
 }
 
