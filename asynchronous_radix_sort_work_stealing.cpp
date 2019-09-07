@@ -172,7 +172,9 @@ public:
     // TODO: Something something ranges, something something no raw loops.
     members.reserve(count);
     for (std::uint64_t i = 0; i < count; ++i) {
-      members.emplace_back(std::jthread(f));
+      members.emplace_back(std::jthread(
+        [=] (std::stop_token stoken) { f(i, stoken); }
+      ));
     }
   }
 
@@ -278,30 +280,58 @@ public:
   }
 };
 
-struct unbounded_depth_task_manager
+struct work_stealing_task_manager
 {
 private:
-  concurrent_unbounded_queue<fire_once<void()>> tasks;
+  static thread_local std::uint32_t this_thread_index;
+
+  std::vector<concurrent_unbounded_queue<fire_once<void()>>> tasks;
+  std::vector<std::uint32_t> enqueue_indices;
+  std::vector<std::uint32_t> dequeue_indices;
+
   std::atomic<std::uint64_t> active_task_count{0};
   std::latch exit_latch;
+
   thread_group threads; // This must be the last member initialized in this class;
                         // we start the threads in the class constructor, and the
                         // worker thread function accesses the other members.
 
+  std::uint32_t advance_index(std::uint32_t& idx) {
+    std::uint32_t tmp = idx;
+    idx = (idx + 1) % tasks.size();
+    return tmp;
+  }
+
+  std::uint32_t next_enqueue_index() {
+    return advance_index(enqueue_indices[this_thread_index]);
+  }
+
+  std::uint32_t next_dequeue_index() {
+    return advance_index(dequeue_indices[this_thread_index]);
+  }
+
+  void reset_dequeue_index() {
+    dequeue_indices[this_thread_index] = this_thread_index;
+  }
+
   void process_tasks(std::stop_token stoken) {
+    TASKLOG(this_thread_index
+            << ": worker thread started; entering primary work loop");
     while (!stoken.stop_requested()) {
-      auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
+      auto f = tasks[next_dequeue_index()].try_dequeue();
       if (f) {
+        reset_dequeue_index();
         active_task_count.fetch_add(1, std::memory_order_release);
         std::move(*f)();
         active_task_count.fetch_sub(1, std::memory_order_release);
       }
     }
-    TASKLOG("worker thread beginning shutdown");
+    TASKLOG(this_thread_index
+            << ": worker thread beginning shutdown");
     // We've gotten a stop request, but there may still be work in the queue,
     // so let's clear it out.
     while (true) {
-      auto f = tasks.try_dequeue();
+      auto f = tasks[this_thread_index].try_dequeue();
       if (f) {
         active_task_count.fetch_add(1, std::memory_order_release);
         std::move(*f)();
@@ -310,31 +340,60 @@ private:
       else if (0 == active_task_count.load(std::memory_order_acquire))
         break;
     }
-    TASKLOG("worker thread has shutdown; arriving at latch");
+    TASKLOG(this_thread_index
+            << ": worker thread has shutdown; arriving at latch");
     exit_latch.arrive_and_wait();
-    TASKLOG("worker thread has shutdown; arrived at latch");
+    TASKLOG(this_thread_index
+            << ": worker thread has shutdown; arrived at latch");
   }
 
 public:
-  unbounded_depth_task_manager(std::uint64_t num_threads)
-    : exit_latch(num_threads + 1)
-    , threads(num_threads, [&] (std::stop_token stoken) { process_tasks(stoken); })
+  work_stealing_task_manager(std::uint64_t num_threads)
+    : tasks(num_threads + 1)
+    , enqueue_indices(num_threads + 1, 0)
+    , dequeue_indices(num_threads + 1, 0)
+    , exit_latch(num_threads + 1)
+    , threads(num_threads,
+        [&] (std::uint64_t thread_index, std::stop_token stoken)
+        {
+          this_thread_index = thread_index;
+          process_tasks(stoken);
+        })
   {}
 
-  ~unbounded_depth_task_manager() {
+  ~work_stealing_task_manager() {
+    // We better be destroying the task manager from an external thread, not
+    // from inside the system.
+    assert(0 == this_thread_index);
+    TASKLOG("sending stop request to all threads");
     threads.request_stop();
+    TASKLOG("clearing out queue 0");
+    // Clear the "external" queue.
+    while (true) {
+      auto f = tasks[this_thread_index].try_dequeue();
+      if (f) {
+        active_task_count.fetch_add(1, std::memory_order_release);
+        std::move(*f)();
+        active_task_count.fetch_sub(1, std::memory_order_release);
+      }
+      else if (0 == active_task_count.load(std::memory_order_acquire))
+        break;
+    }
+    TASKLOG("task manager has shutdown; arriving at latch");
     exit_latch.arrive_and_wait();
+    TASKLOG("task manager has shutdown; arrived at latch");
   }
 
   template <typename Invocable>
   void enqueue(Invocable&& f) {
-    tasks.enqueue(std::forward<decltype(f)>(f));
+    tasks[next_enqueue_index()].enqueue(std::forward<decltype(f)>(f));
   }
 
   void boost_block() {
     // Dequeue and execute tasks to make progress.
-    auto f = tasks.try_dequeue();
+    auto f = tasks[next_dequeue_index()].try_dequeue();
     if (f) {
+      reset_dequeue_index();
       active_task_count.fetch_add(1, std::memory_order_release);
       std::move(*f)();
       active_task_count.fetch_sub(1, std::memory_order_release);
@@ -343,10 +402,10 @@ public:
 
   struct executor {
   private:
-    unbounded_depth_task_manager* tm;
+    work_stealing_task_manager* tm;
 
   public:
-    executor(unbounded_depth_task_manager* tm_) : tm(tm_) {
+    executor(work_stealing_task_manager* tm_) : tm(tm_) {
       assert(tm);
     }
 
@@ -376,6 +435,8 @@ public:
     return executor{this};
   }
 };
+
+thread_local std::uint32_t work_stealing_task_manager::this_thread_index{0};
 
 template <typename T>
 struct asynchronous_value {
@@ -1374,7 +1435,7 @@ int main(int argc, char** argv)
   double time_radix_parallel = 0.0;
 
   {
-    unbounded_depth_task_manager tm(threads);
+    work_stealing_task_manager tm(threads);
 
     auto const start = std::chrono::high_resolution_clock::now();
     passes_radix_parallel = async_radix_sort(tm.get_executor(),
