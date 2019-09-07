@@ -559,11 +559,11 @@ private:
 
 public:
   // DefaultConstructible
-  constexpr unique_promise() noexcept = default;
+  constexpr unique_promise() = default;
 
   // MoveAssignable
-  constexpr unique_promise(unique_promise&&) noexcept = default;
-  constexpr unique_promise& operator=(unique_promise&&) noexcept = default;
+  constexpr unique_promise(unique_promise&&) = default;
+  constexpr unique_promise& operator=(unique_promise&&) = default;
 
   // Not CopyAssignable
   unique_promise(unique_promise const&) = delete;
@@ -627,11 +627,11 @@ private:
 
 public:
   // DefaultConstructible
-  constexpr unique_future() noexcept = default;
+  constexpr unique_future() = default;
 
   // MoveAssignable
-  constexpr unique_future(unique_future&&) noexcept = default;
-  constexpr unique_future& operator=(unique_future&&) noexcept = default;
+  constexpr unique_future(unique_future&&) = default;
+  constexpr unique_future& operator=(unique_future&&) = default;
 
   // Not CopyAssignable
   unique_future(unique_future const&) = delete;
