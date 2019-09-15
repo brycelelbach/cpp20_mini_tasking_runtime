@@ -249,7 +249,7 @@ struct unbounded_depth_task_manager
 {
 private:
   concurrent_unbounded_queue<fire_once<void()>> tasks;
-  std::atomic<std::size_t> active_task_count{0};
+  //std::atomic<std::size_t> active_task_count{0};
   std::latch exit_latch;
   thread_group threads; // This must be the last member initialized in this class;
                         // we start the threads in the class constructor, and the
@@ -259,9 +259,9 @@ private:
     while (!stoken.stop_requested()) {
       auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
       if (f) {
-        active_task_count.fetch_add(1, std::memory_order_release);
+        //active_task_count.fetch_add(1, std::memory_order_release);
         std::move(*f)();
-        active_task_count.fetch_sub(1, std::memory_order_release);
+        //active_task_count.fetch_sub(1, std::memory_order_release);
       }
     }
     LOG("worker thread beginning shutdown");
@@ -271,7 +271,7 @@ private:
       auto f = tasks.try_dequeue();
       if (f)
         std::move(*f)();
-      else if (0 == active_task_count.load(std::memory_order_acquire))
+      else //if (0 == active_task_count.load(std::memory_order_acquire))
         break;
     }
     LOG("worker thread has shutdown; arriving at latch");
@@ -299,9 +299,9 @@ public:
     // Dequeue and execute tasks to make progress.
     auto f = tasks.try_dequeue();
     if (f) {
-      active_task_count.fetch_add(1, std::memory_order_release);
+      //active_task_count.fetch_add(1, std::memory_order_release);
       std::move(*f)();
-      active_task_count.fetch_sub(1, std::memory_order_release);
+      //active_task_count.fetch_sub(1, std::memory_order_release);
     }
   }
 

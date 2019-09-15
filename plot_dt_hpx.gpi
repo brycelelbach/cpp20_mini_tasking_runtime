@@ -1,0 +1,21 @@
+set terminal png enhanced size 1440,960 font ",16"
+
+set tics nomirror out
+set border 3
+
+unset key
+
+set pm3d map
+
+FINAL_STEP=1000
+
+set xrange[15:FINAL_STEP]
+
+set xtics (0, 100, 200, 300, 400)
+
+set xlabel "Time [timesteps]" font ",24"
+set ylabel "Timestep Size" font ",24"
+
+set output 'dt_hpx.png'
+set title 'Timestep Size vs Time' font ",28"
+plot './dt_hpx.dat' using 1:2 with linespoints pt 7 lw 1.25 ps 0.75

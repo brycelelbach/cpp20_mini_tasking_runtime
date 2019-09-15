@@ -644,7 +644,7 @@ public:
   }
 
   template <typename UExecutor, typename Invocable>
-  auto submit(UExecutor uexec, Invocable&& f) {
+  void submit(UExecutor uexec, Invocable&& f) {
     data->set_continuation(
       [uexec, f = std::forward<Invocable>(f)]
       (T&& t) mutable {

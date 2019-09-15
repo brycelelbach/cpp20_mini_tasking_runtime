@@ -231,7 +231,7 @@ int main()
   std::atomic<std::uint64_t> count(0);
 
   {
-    bounded_depth_task_manager<64> tm(8);
+    bounded_depth_task_manager<64> tm(6);
 
     for (std::size_t i = 0; i < 128; ++i)
       tm.enqueue([&] { ++count; });

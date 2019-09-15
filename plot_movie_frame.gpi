@@ -1,0 +1,23 @@
+OUTPUT=(sprintf('step.%04i.jpeg', STEP))
+
+set terminal jpeg size 1280,800
+set output OUTPUT 
+
+set multiplot layout 1, 2
+
+unset key
+set tics out nomirror
+
+set title (sprintf('Density vs Position, Timestep %i', STEP))
+set ylabel 'rho'
+set xlabel 'X'
+set yrange [0.95:1.35]
+plot INPUT using ($1==STEP?$2:1/0):3 with lines
+
+set title (sprintf('Momentum vs Position, Timestep %i', STEP))
+set ylabel 'rho*v'
+set xlabel 'X'
+set yrange [*:*]
+set yrange [-0.4:0.4]
+plot INPUT using ($1==STEP?$2:1/0):4 with lines
+

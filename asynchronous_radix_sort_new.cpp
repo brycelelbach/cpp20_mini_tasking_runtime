@@ -172,7 +172,9 @@ public:
     // TODO: Something something ranges, something something no raw loops.
     members.reserve(count);
     for (std::uint64_t i = 0; i < count; ++i) {
-      members.emplace_back(std::jthread(f));
+      members.emplace_back(std::jthread(
+        [=] (std::stop_token stoken) { f(i, stoken); }
+      ));
     }
   }
 
@@ -278,30 +280,58 @@ public:
   }
 };
 
-struct unbounded_depth_task_manager
+struct work_stealing_task_manager
 {
 private:
-  concurrent_unbounded_queue<fire_once<void()>> tasks;
+  static thread_local std::uint32_t this_thread_index;
+
+  std::vector<concurrent_unbounded_queue<fire_once<void()>>> tasks;
+  std::vector<std::uint32_t> enqueue_indices;
+  std::vector<std::uint32_t> dequeue_indices;
+
   std::atomic<std::uint64_t> active_task_count{0};
   std::latch exit_latch;
+
   thread_group threads; // This must be the last member initialized in this class;
                         // we start the threads in the class constructor, and the
                         // worker thread function accesses the other members.
 
+  std::uint32_t advance_index(std::uint32_t& idx) {
+    std::uint32_t tmp = idx;
+    idx = (idx + 1) % tasks.size();
+    return tmp;
+  }
+
+  std::uint32_t next_enqueue_index() {
+    return advance_index(enqueue_indices[this_thread_index]);
+  }
+
+  std::uint32_t next_dequeue_index() {
+    return advance_index(dequeue_indices[this_thread_index]);
+  }
+
+  void reset_dequeue_index() {
+    dequeue_indices[this_thread_index] = this_thread_index;
+  }
+
   void process_tasks(std::stop_token stoken) {
+    TASKLOG(this_thread_index
+            << ": worker thread started; entering primary work loop");
     while (!stoken.stop_requested()) {
-      auto f = tasks.try_dequeue_for(std::chrono::milliseconds(1));
+      auto f = tasks[next_dequeue_index()].try_dequeue();
       if (f) {
+        reset_dequeue_index();
         active_task_count.fetch_add(1, std::memory_order_release);
         std::move(*f)();
         active_task_count.fetch_sub(1, std::memory_order_release);
       }
     }
-    TASKLOG("worker thread beginning shutdown");
+    TASKLOG(this_thread_index
+            << ": worker thread beginning shutdown");
     // We've gotten a stop request, but there may still be work in the queue,
     // so let's clear it out.
     while (true) {
-      auto f = tasks.try_dequeue();
+      auto f = tasks[this_thread_index].try_dequeue();
       if (f) {
         active_task_count.fetch_add(1, std::memory_order_release);
         std::move(*f)();
@@ -310,43 +340,72 @@ private:
       else if (0 == active_task_count.load(std::memory_order_acquire))
         break;
     }
-    TASKLOG("worker thread has shutdown; arriving at latch");
+    TASKLOG(this_thread_index
+            << ": worker thread has shutdown; arriving at latch");
     exit_latch.arrive_and_wait();
-    TASKLOG("worker thread has shutdown; arrived at latch");
+    TASKLOG(this_thread_index
+            << ": worker thread has shutdown; arrived at latch");
   }
 
 public:
-  unbounded_depth_task_manager(std::uint64_t num_threads)
-    : exit_latch(num_threads + 1)
-    , threads(num_threads, [&] (std::stop_token stoken) { process_tasks(stoken); })
+  work_stealing_task_manager(std::uint64_t num_threads)
+    : tasks(num_threads + 1)
+    , enqueue_indices(num_threads + 1, 0)
+    , dequeue_indices(num_threads + 1, 0)
+    , exit_latch(num_threads + 1)
+    , threads(num_threads,
+        [&] (std::uint64_t thread_index, std::stop_token stoken)
+        {
+          this_thread_index = thread_index;
+          process_tasks(stoken);
+        })
   {}
 
-  ~unbounded_depth_task_manager() {
+  ~work_stealing_task_manager() {
+    // We better be destroying the task manager from an external thread, not
+    // from inside the system.
+    assert(0 == this_thread_index);
+    TASKLOG("sending stop request to all threads");
     threads.request_stop();
+    TASKLOG("clearing out queue 0");
+    // Clear the "external" queue.
+    while (true) {
+      auto f = tasks[this_thread_index].try_dequeue();
+      if (f) {
+        //active_task_count.fetch_add(1, std::memory_order_release);
+        std::move(*f)();
+        //active_task_count.fetch_sub(1, std::memory_order_release);
+      }
+      else //if (0 == active_task_count.load(std::memory_order_acquire))
+        break;
+    }
+    TASKLOG("task manager has shutdown; arriving at latch");
     exit_latch.arrive_and_wait();
+    TASKLOG("task manager has shutdown; arrived at latch");
   }
 
   template <typename Invocable>
   void enqueue(Invocable&& f) {
-    tasks.enqueue(std::forward<decltype(f)>(f));
+    tasks[next_enqueue_index()].enqueue(std::forward<decltype(f)>(f));
   }
 
   void boost_block() {
     // Dequeue and execute tasks to make progress.
-    auto f = tasks.try_dequeue();
+    auto f = tasks[next_dequeue_index()].try_dequeue();
     if (f) {
-      active_task_count.fetch_add(1, std::memory_order_release);
+      reset_dequeue_index();
+      //active_task_count.fetch_add(1, std::memory_order_release);
       std::move(*f)();
-      active_task_count.fetch_sub(1, std::memory_order_release);
+      //active_task_count.fetch_sub(1, std::memory_order_release);
     }
   }
 
   struct executor {
   private:
-    unbounded_depth_task_manager* tm;
+    work_stealing_task_manager* tm;
 
   public:
-    executor(unbounded_depth_task_manager* tm_) : tm(tm_) {
+    executor(work_stealing_task_manager* tm_) : tm(tm_) {
       assert(tm);
     }
 
@@ -376,6 +435,8 @@ public:
     return executor{this};
   }
 };
+
+thread_local std::uint32_t work_stealing_task_manager::this_thread_index{0};
 
 template <typename T>
 struct asynchronous_value {
@@ -509,8 +570,7 @@ public:
   unique_promise& operator=(unique_promise const&) = delete;
 
   bool ready() const {
-    if (data)
-      return data->value_ready();
+    if (data) return data->ready();
     return false;
   }
 
@@ -559,6 +619,9 @@ private:
     , exec(std::forward<UExecutor>(uexec))
   {}
 
+  template <typename U, typename Executor0, typename Executor1>
+  friend auto when_all(Executor0 exec, std::vector<unique_future<U, Executor1>>& fs);
+
   friend struct unique_promise<T>;
 
   template <typename U, typename UExecutor>
@@ -587,13 +650,8 @@ public:
     data->set_continuation(
       [uexec, f = std::forward<Invocable>(f)]
       (T&& t) mutable {
-        SYNCLOG("enqueuing invocation of continuation");
-        uexec.execute(
-          [f = std::move(f), t = std::move(t)] () mutable  {
-            SYNCLOG("invoking then continuation");
-            std::invoke(std::move(f), std::move(t));
-          }
-        );
+        SYNCLOG("invoking then continuation");
+        std::invoke(std::move(f), std::move(t));
       }
     );
   }
@@ -609,12 +667,7 @@ public:
       [uexec, f = std::forward<Invocable>(f), p = std::move(p)]
       (T&& t) mutable {
         SYNCLOG("enqueuing invocation of continuation");
-        uexec.execute(
-          [f = std::move(f), p = std::move(p), t = std::move(t)] () mutable  {
-            SYNCLOG("invoking then continuation");
-            p.set(std::invoke(std::move(f), std::move(t)));
-          }
-        );
+        p.set(std::invoke(std::move(f), std::move(t)));
       }
     );
     return std::move(g);
@@ -639,17 +692,9 @@ public:
       auto g = p.get_future(uexec);
       data->set_continuation(
         [uexec, p = std::move(p)] (unique_future<V, VExecutor>&& in) mutable {
-          uexec.execute(
-            [in = std::move(in), p = std::move(p)] () mutable {
-              in.data->set_continuation(
-                [in = std::move(in), p = std::move(p)] (V&& v) mutable {
-                  in.executor().execute(
-                    [p = std::move(p), v = std::move(v)] () mutable {
-                      p.set(std::move(v));
-                    }
-                  );
-                }
-              );
+          in.data->set_continuation(
+            [in = std::move(in), p = std::move(p)] (V&& v) mutable {
+              p.set(std::move(v));
             }
           );
         }
@@ -678,7 +723,7 @@ public:
   }
 
   T get() {
-    std::counting_semaphore<1> sem;
+    std::binary_semaphore sem;
 
     std::optional<T> v;
 
@@ -706,11 +751,7 @@ public:
   void await_suspend(std::experimental::coroutine_handle<Promise> c) {
     data->set_on_completed(
       [exec = exec, c = std::move(c)] () mutable {
-        exec.execute(
-          [c = std::move(c)] () mutable {
-            c();
-          }
-        );
+        c();
       }
     );
   }
@@ -796,30 +837,25 @@ auto when_all(Executor0 exec, std::vector<unique_future<T, Executor1>>& fs) {
   // FIXME: Only works for default constructible types.
   auto results = std::make_shared<std::vector<T>>(fs.size());
 
-  unique_promise<std::vector<T>> p;
-  auto g = p.get_future(exec);
+  auto av = std::make_shared<asynchronous_value<std::vector<T>>>();
+  auto g = unique_future<std::vector<T>, Executor0>(av, exec);
 
-  auto finalize =
-    [exec, results, p = std::move(p)] () mutable {
-      exec.execute(
-        [results, p = std::move(p)] () mutable {
-          SYNCLOG("finalizing barrier");
-          p.set(std::move(*results));
-        }
-      );
-    };
-
-  auto barrier = std::make_shared<std::barrier<decltype(finalize)>>(
-    fs.size(), std::move(finalize)
-  );
+  auto gate = std::make_shared<std::atomic<std::uint64_t>>(0);
 
   for (std::uint64_t i = 0; i < fs.size(); ++i) {
     fs[i].submit(
       exec,
-      [i, results, barrier] (T&& t) mutable {
+      [av, i, results, gate] (T&& t) mutable {
         SYNCLOG("assigning when_all result[" << i << "]");
         (*results)[i] = std::move(t);
-        barrier->arrive_and_drop();
+        std::uint64_t expected = gate->load(std::memory_order_acquire);
+        while (!gate->compare_exchange_strong(expected, expected + 1,
+                                              std::memory_order_acq_rel))
+          ;
+        if (expected + 1 == results->size()) {
+          SYNCLOG("setting when_all promise");
+          av->set_value(std::move(*results));
+        }
       }
     );
   }
@@ -1343,9 +1379,11 @@ int main(int argc, char** argv)
     std::copy(gold.begin(), gold.end(), radix_serial.begin());
   }
 
+  ALGOLOG("initialization complete");
+
   if (512 >= elements)
     for (std::uint64_t i = 0; i < elements; ++i)
-      std::cout << "initial gold[" << i << "](" << gold[i] << ")\n";
+      std::cout << "initial[" << i << "](" << gold[i] << ")\n";
 
   double time_gold = 0.0;
 
@@ -1357,6 +1395,8 @@ int main(int argc, char** argv)
     std::chrono::duration<double> time(end - start);
     time_gold = time.count();
   }
+
+  ALGOLOG("gold complete");
 
   std::uint64_t passes_radix_serial = 0;
   double time_radix_serial = 0.0;
@@ -1370,11 +1410,13 @@ int main(int argc, char** argv)
     time_radix_serial = time.count();
   }
 
+  ALGOLOG("radix_serial complete");
+
   std::uint64_t passes_radix_parallel = 0;
   double time_radix_parallel = 0.0;
 
   {
-    unbounded_depth_task_manager tm(threads);
+    work_stealing_task_manager tm(threads);
 
     auto const start = std::chrono::high_resolution_clock::now();
     passes_radix_parallel = async_radix_sort(tm.get_executor(),
@@ -1387,9 +1429,10 @@ int main(int argc, char** argv)
     time_radix_parallel = time.count();
   }
 
+  ALGOLOG("radix_parallel complete");
+
   std::cout << "passes_radix_serial(" << passes_radix_serial
             << ") passes_radix_parallel(" << passes_radix_parallel << ")\n";
-
 
   if (!std::equal(gold.begin(), gold.end(), radix_serial.begin()))
     std::cout << "SERIAL RADIX SORT RESULT FAILED COMPARISON WITH GOLD\n";

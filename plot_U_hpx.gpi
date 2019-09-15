@@ -1,0 +1,37 @@
+set terminal png enhanced size 960,1280 font ",16"
+
+set tics nomirror out
+
+unset key
+
+set pm3d map
+
+FINAL_STEP=1000
+
+set xrange[0:99]
+set yrange[0:FINAL_STEP]
+
+set xtics (0, 49, 99)
+
+set size 1.0,0.75; set origin 0,0.25
+set colorbox horizontal
+set colorbox user origin 0.1,0.15 size 0.8,0.1
+
+set xlabel "Space" font ",24"
+set ylabel "Time" font ",24"
+set cblabel font ",24" 
+
+set output 'U_hpx_mom.png'
+set title 'Momentum' font ",28"
+set cblabel "Momentum"
+splot './U_hpx.dat' using 2:1:4 with pm3d 
+
+set output 'U_hpx_vel.png'
+set title 'Velocity' font ",28"
+set cblabel "Velocity"
+splot './U_hpx.dat' using 2:1:($4/$3) with pm3d 
+
+set output 'U_hpx_rho.png'
+set title 'Density' font ",28"
+set cblabel "Density"
+splot './U_hpx.dat' using 2:1:3 with pm3d 

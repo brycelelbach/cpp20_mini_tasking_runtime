@@ -17,7 +17,7 @@ ISO_CXX                     ?= /home/wash/install/cpp_toolchains/clang_llvm_conc
 # ISO C++ dialect.
 ISO_CXX_DIALECT             ?= c++2a
 # Flags passed to the ISO C++ compiler when compiling ISO C++ code.
-ISO_CXX_FLAGS               ?= -Xclang -fconcepts-ts -D__TABLE_INLINE -D__BARRIER_INLINE_FAVORITE_HASH -D__BARRIER_NO_BUTTERFLY -D__NO_SEM_FRONT -pthread -Wall
+ISO_CXX_FLAGS               ?= -Xclang -fconcepts-ts -D__TABLE_INLINE -D__BARRIER_INLINE_FAVORITE_HASH -D__BARRIER_NO_BUTTERFLY -D__BARRIER_NO_WAIT -D__NO_SEM_FRONT -pthread -Wall
 # Directories to search for ISO C++ headers in.
 ISO_CXX_INCLUDE_DIRECTORIES ?= /home/wash/development/nvidia/cjdb_concepts_ranges/include \
                                /home/wash/development/nvidia/cpp20_synchronization_library/include
