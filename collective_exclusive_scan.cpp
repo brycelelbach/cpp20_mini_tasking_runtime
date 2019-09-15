@@ -1273,7 +1273,7 @@ private:
 
   void scan_aggregates() {
     // Add in the initial value here.
-    std::inclusive_scan(aggregates.begin(), aggregates.end(), aggregates.begin(), op, std::move(init));
+    std::exclusive_scan(aggregates.begin(), aggregates.end(), aggregates.begin(), std::move(init), op);
 
     for (std::size_t i = 0; i < concurrency; ++i)
       ALGOLOG("aggregates[" << i << "](" << aggregates[i] << ")");
@@ -1336,18 +1336,18 @@ public:
     ALGOLOG("chunk(" << chunk << ") arrived at upsweep_gate");
 
     // Downsweep.
-    if (0 != chunk) {
-      ALGOLOG("after aggregate aggregates[" << chunk - 1
-              << "](" << aggregates[chunk - 1] << ")");
+//    if (0 != chunk) {
+      ALGOLOG("after aggregate aggregates[" << chunk/* - 1*/
+              << "](" << aggregates[chunk/* - 1*/] << ")");
 
       std::for_each(output, output + std::distance(first, last),
                     [&, chunk] (auto& t) {
                       ALGOLOG("downsweep for_each t(" << t
-                              << ") aggregates[" << chunk - 1
-                              << "](" << aggregates[chunk - 1] << ")");
-                      t = op(std::move(t), aggregates[chunk - 1]);
+                              << ") aggregates[" << chunk/* - 1*/
+                              << "](" << aggregates[chunk/* - 1*/] << ")");
+                      t = op(std::move(t), aggregates[chunk/* - 1*/]);
                     });
-    }
+//    }
 
     ALGOLOG("chunk(" << chunk << ") arriving at downsweep_gate");
     downsweep_gate.arrive_and_wait();
@@ -1399,7 +1399,7 @@ int main(int argc, char** argv) {
   {
     auto const start = std::chrono::high_resolution_clock::now();
     std::exclusive_scan(gold.begin(), gold.end(), gold.begin(),
-                        std::uint64_t(0), std::plus{});
+                        std::uint64_t(4), std::plus{});
     auto const end   = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> time(end - start);
@@ -1418,7 +1418,7 @@ int main(int argc, char** argv) {
                          parallel_task.begin(),
                          parallel_task.end(),
                          parallel_task.begin(),
-                         std::uint64_t(0),
+                         std::uint64_t(4),
                          std::plus{}).get(tm);
     auto const end   = std::chrono::high_resolution_clock::now();
 
@@ -1438,7 +1438,7 @@ int main(int argc, char** argv) {
                          parallel_collective.begin(),
                          parallel_collective.end(),
                          parallel_collective.begin(),
-                         std::uint64_t(0),
+                         std::uint64_t(4),
                          std::plus{});
     es.launch(tm).get(tm);
     auto const end   = std::chrono::high_resolution_clock::now();
